@@ -101,16 +101,21 @@ class GaraConfig:
     ADMIN_IDS: List[int] = []
 
     TRIVIA_QUESTIONS = [
-        ("What is 7 × 8?", "56"),
-        ("What planet is closest to the Sun?", "mercury"),
-        ("How many sides does a hexagon have?", "6"),
-        ("What is the chemical symbol for gold?", "au"),
-        ("What year did World War II end?", "1945"),
-        ("What is the capital of France?", "paris"),
-        ("How many continents are there?", "7"),
-        ("What is the fastest land animal?", "cheetah"),
-        ("How many bones in the adult human body?", "206"),
-        ("What gas do plants absorb?", "carbon dioxide"),
+        ("What is 7 × 8?", "56", ["42", "48", "63"]),
+        ("What planet is closest to the Sun?", "Mercury", ["Venus", "Mars", "Earth"]),
+        ("How many sides does a hexagon have?", "6", ["4", "5", "8"]),
+        ("What is the chemical symbol for gold?", "Au", ["Ag", "Fe", "Cu"]),
+        ("What year did World War II end?", "1945", ["1939", "1942", "1944"]),
+        ("What is the capital of France?", "Paris", ["London", "Berlin", "Madrid"]),
+        ("How many continents are there?", "7", ["5", "6", "8"]),
+        ("What is the fastest land animal?", "Cheetah", ["Lion", "Horse", "Leopard"]),
+        ("How many bones in the adult human body?", "206", ["208", "212", "198"]),
+        ("What gas do plants absorb?", "Carbon Dioxide", ["Oxygen", "Nitrogen", "Helium"]),
+        ("What is the square root of 144?", "12", ["11", "13", "14"]),
+        ("Which planet is known for its rings?", "Saturn", ["Jupiter", "Mars", "Neptune"]),
+        ("How many players on a standard soccer team?", "11", ["9", "10", "12"]),
+        ("What is the largest ocean?", "Pacific", ["Atlantic", "Indian", "Arctic"]),
+        ("What is the currency of Japan?", "Yen", ["Won", "Yuan", "Peso"]),
     ]
 
 
@@ -610,6 +615,41 @@ def is_admin(ctx):
     return False
 
 
+def _build_roles_embed(guild: discord.Guild) -> discord.Embed:
+    """Build the detailed VC earn-roles UI embed for a guild."""
+    gid = guild.id
+    tiers = get_tiers(gid)
+    sorted_tiers = sorted(tiers, key=lambda x: x["hours"], reverse=True)
+    abbrev = get_currency_abbrev(gid)
+
+    header = (
+        "Spend active time in voice channels (unmuted & undeafened) to climb the tiers "
+        "and unlock daily rewards + economy multipliers.\n\u200b"
+    )
+
+    lines = []
+    tier_icons = ["👑", "💎", "🥇", "🥈", "🥉", "🎖️", "🏅", "⭐"]
+    for i, t in enumerate(sorted_tiers):
+        icon = tier_icons[i] if i < len(tier_icons) else "•"
+        role = guild.get_role(t.get("role_id") or 0)
+        role_str = role.mention if role else f"**{t['name']}**"
+        lines.append(
+            f"{icon} {role_str}\n"
+            f"   `{t['hours']}h` voice time  •  "
+            f"`{t['daily']:,}` {abbrev}/day  •  "
+            f"`×{t['mult']}` economy mult"
+        )
+
+    desc = header + "\n\n".join(lines)
+    return gara_embed(
+        title="Earn Roles",
+        description=desc,
+        color=GaraConfig.EMBED_COLOR_ACCENT,
+        guild_id=gid,
+        footer="Time tracked in active voice — must be unmuted and undeafened",
+    )
+
+
 async def get_user_tier(guild_id: int, vc_hours: float):
     tiers = get_tiers(guild_id)
     current = None
@@ -667,10 +707,50 @@ def gara_embed(title=None, description=None, color=None, thumbnail=None, footer=
 # VIEWS
 # ══════════════════════════════════════════
 
-# ── Mines Button Grid ──
+# ── Mines ──
+
+MINES_DIFFICULTY = {
+    "easy":   {"mines": 2, "per_gem": 1.12, "label": "Easy",   "gems": 7},
+    "medium": {"mines": 3, "per_gem": 1.25, "label": "Medium", "gems": 6},
+    "hard":   {"mines": 5, "per_gem": 1.50, "label": "Hard",   "gems": 4},
+}
+
+class MinesDifficultyView(View):
+    def __init__(self, ctx, bet):
+        super().__init__(timeout=30)
+        self.ctx = ctx
+        self.bet = bet
+
+    async def _start(self, interaction: discord.Interaction, diff_key: str):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("Not your game!", ephemeral=True)
+            return
+        diff = MINES_DIFFICULTY[diff_key]
+        grid = ["💎"] * diff["gems"] + ["💣"] * diff["mines"]
+        random.shuffle(grid)
+        await db.sub_balance(self.ctx.author.id, self.ctx.guild.id, self.bet)
+        await db.create_mines_game(self.ctx.author.id, self.ctx.guild.id, self.bet, grid)
+        view = MinesView(self.ctx.author.id, self.ctx.guild.id, self.bet, grid, [], 1.0, diff["per_gem"])
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(embed=view.make_embed(), view=view)
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Easy", style=discord.ButtonStyle.success)
+    async def easy(self, interaction, button):
+        await self._start(interaction, "easy")
+
+    @discord.ui.button(label="Medium", style=discord.ButtonStyle.primary)
+    async def medium(self, interaction, button):
+        await self._start(interaction, "medium")
+
+    @discord.ui.button(label="Hard", style=discord.ButtonStyle.danger)
+    async def hard(self, interaction, button):
+        await self._start(interaction, "hard")
+
 
 class MinesView(View):
-    def __init__(self, user_id, guild_id, bet, grid, revealed, multiplier):
+    def __init__(self, user_id, guild_id, bet, grid, revealed, multiplier, per_gem=1.25):
         super().__init__(timeout=120)
         self.user_id = user_id
         self.guild_id = guild_id
@@ -678,26 +758,41 @@ class MinesView(View):
         self.grid = grid
         self.revealed = revealed
         self.multiplier = multiplier
+        self.per_gem = per_gem
         self.message = None
         self._build_buttons()
+
+    def _mine_count(self):
+        return self.grid.count("💣")
+
+    def make_embed(self):
+        abbrev = get_currency_abbrev(self.guild_id)
+        mines = self._mine_count()
+        safe = 9 - mines - len(self.revealed)
+        potential = int(self.bet * self.multiplier)
+        desc = (
+            f"**Bet:** {self.bet:,} {abbrev}\n"
+            f"**Mult:** {self.multiplier:.2f}× → **{potential:,}** {abbrev}\n"
+            f"**Mines:** {mines}  •  **Safe left:** {safe}"
+        )
+        return gara_embed(title="Mines", description=desc,
+                          color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=self.guild_id)
 
     def _build_buttons(self):
         self.clear_items()
         for i in range(9):
             is_rev = i in self.revealed
             if is_rev:
-                label = "💎"
-                style = discord.ButtonStyle.success
-                disabled = True
+                btn = Button(emoji="💎", style=discord.ButtonStyle.success, disabled=True, row=i // 3)
             else:
-                label = str(i + 1)
-                style = discord.ButtonStyle.secondary
-                disabled = False
-            btn = Button(label=label, style=style, disabled=disabled, row=i // 3)
+                btn = Button(label="●", style=discord.ButtonStyle.secondary, row=i // 3)
             btn.custom_id = f"mine_{i}"
             btn.callback = self._make_callback(i)
             self.add_item(btn)
-        co = Button(label=f"Cash Out ({int(self.bet * self.multiplier):,})", style=discord.ButtonStyle.primary, row=3)
+        potential = int(self.bet * self.multiplier)
+        abbrev = get_currency_abbrev(self.guild_id)
+        co = Button(label=f"Cash Out  {potential:,} {abbrev}", style=discord.ButtonStyle.primary, row=3,
+                    disabled=(len(self.revealed) == 0))
         co.callback = self.cashout_callback
         self.add_item(co)
 
@@ -718,32 +813,42 @@ class MinesView(View):
             revealed.append(index)
             if grid[index] == "💣":
                 await db.delete_mines_game(self.user_id, self.guild_id)
-                grid_str = self._grid_str(grid, revealed, explode=index)
+                self.grid = grid
+                self.revealed = revealed
+                self._reveal_all_mines()
                 embed = gara_embed(
-                    title="💥 BOOM! You hit a mine!",
-                    description=f"Lost **{self.bet:,}** {get_currency_abbrev(self.guild_id)}\n\n{grid_str}",
+                    title="BOOM — Mine hit",
+                    description=f"Lost **{self.bet:,}** {get_currency_abbrev(self.guild_id)}",
                     color=GaraConfig.EMBED_COLOR_FAIL, guild_id=self.guild_id,
                 )
-                for item in self.children:
-                    item.disabled = True
                 await interaction.response.edit_message(embed=embed, view=self)
                 self.stop()
             else:
-                new_mult = game["multiplier"] * 1.25
+                new_mult = round(game["multiplier"] * self.per_gem, 4)
                 await db.update_mines_game(self.user_id, self.guild_id, revealed, new_mult)
                 self.revealed = revealed
                 self.multiplier = new_mult
                 self.grid = grid
-                potential = int(self.bet * new_mult)
-                grid_str = self._grid_str(grid, revealed)
-                embed = gara_embed(
-                    title="✅ Safe!",
-                    description=f"Multiplier: **{new_mult:.2f}x** | Potential: **{potential:,}** {get_currency_abbrev(self.guild_id)}\n\n{grid_str}",
-                    color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.guild_id,
-                )
                 self._build_buttons()
-                await interaction.response.edit_message(embed=embed, view=self)
+                await interaction.response.edit_message(embed=self.make_embed(), view=self)
         return callback
+
+    def _reveal_all_mines(self):
+        self.clear_items()
+        for i in range(9):
+            is_mine = self.grid[i] == "💣"
+            is_rev = i in self.revealed
+            if is_mine and i == self.revealed[-1]:
+                btn = Button(emoji="💥", style=discord.ButtonStyle.danger, disabled=True, row=i // 3)
+            elif is_mine:
+                btn = Button(emoji="💣", style=discord.ButtonStyle.danger, disabled=True, row=i // 3)
+            elif is_rev:
+                btn = Button(emoji="💎", style=discord.ButtonStyle.success, disabled=True, row=i // 3)
+            else:
+                btn = Button(label="●", style=discord.ButtonStyle.secondary, disabled=True, row=i // 3)
+            self.add_item(btn)
+        co = Button(label="Game Over", style=discord.ButtonStyle.primary, row=3, disabled=True)
+        self.add_item(co)
 
     async def cashout_callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
@@ -756,9 +861,10 @@ class MinesView(View):
         winnings = int(game["bet"] * game["multiplier"])
         await db.delete_mines_game(self.user_id, self.guild_id)
         await db.add_balance(self.user_id, self.guild_id, winnings)
+        abbrev = get_currency_abbrev(self.guild_id)
         embed = gara_embed(
-            title="💰 Cashed Out!",
-            description=f"Bet: **{game['bet']:,}** | Mult: **{game['multiplier']:.2f}x**\nWon: **{winnings:,}** {get_currency_abbrev(self.guild_id)}!",
+            title="Cashed Out",
+            description=f"**{winnings:,}** {abbrev} won at **{game['multiplier']:.2f}×**",
             color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.guild_id,
         )
         for item in self.children:
@@ -766,21 +872,11 @@ class MinesView(View):
         await interaction.response.edit_message(embed=embed, view=self)
         self.stop()
 
-    def _grid_str(self, grid, revealed, explode=None):
-        icons = []
-        for i in range(9):
-            if i == explode:
-                icons.append("💥")
-            elif i in revealed:
-                icons.append("💎")
-            else:
-                icons.append("⬛")
-        return f"{icons[0]}{icons[1]}{icons[2]}\n{icons[3]}{icons[4]}{icons[5]}\n{icons[6]}{icons[7]}{icons[8]}"
-
 
 # ── Blackjack ──
 
 DECK = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"] * 4
+SUITS = ["♠","♥","♦","♣"]
 
 def card_value(hand):
     val = 0
@@ -799,7 +895,7 @@ def card_value(hand):
     return val
 
 def hand_str(hand):
-    return " ".join(f"`{c}`" for c in hand)
+    return "  ".join(f"`{c}`" for c in hand)
 
 class BlackjackView(View):
     def __init__(self, ctx, bet, deck, player, dealer):
@@ -811,15 +907,35 @@ class BlackjackView(View):
         self.dealer = dealer
 
     def make_embed(self, done=False, result=""):
-        dealer_show = hand_str(self.dealer) if done else f"`{self.dealer[0]}` `?`"
+        pv = card_value(self.player)
+        dealer_show = hand_str(self.dealer) if done else f"`{self.dealer[0]}`  `?`"
+        dv_str = str(card_value(self.dealer)) if done else "?"
+        abbrev = get_currency_abbrev(self.ctx.guild.id)
         desc = (
-            f"**Your hand:** {hand_str(self.player)} = **{card_value(self.player)}**\n"
-            f"**Dealer:** {dealer_show}"
+            f"```\n"
+            f"  You     {hand_str(self.player)}\n"
+            f"  Score   {pv}\n"
+            f"\n"
+            f"  Dealer  {dealer_show}\n"
+            f"  Score   {dv_str}\n"
+            f"```"
         )
+        if done and result:
+            desc += f"\n{result}"
+        color = GaraConfig.EMBED_COLOR_ACCENT
         if done:
-            desc += f"\n\n{result}"
-        return gara_embed(title="🃏 Blackjack", description=desc,
-                          color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=self.ctx.guild.id)
+            if "win" in result.lower() or "blackjack" in result.lower():
+                color = GaraConfig.EMBED_COLOR_SUCCESS
+            elif "push" in result.lower():
+                color = GaraConfig.EMBED_COLOR_WARN
+            else:
+                color = GaraConfig.EMBED_COLOR_FAIL
+        return gara_embed(
+            title=f"Blackjack  —  {self.bet:,} {abbrev}",
+            description=desc,
+            color=color,
+            guild_id=self.ctx.guild.id,
+        )
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: discord.Interaction, button: Button):
@@ -833,13 +949,13 @@ class BlackjackView(View):
             for b in self.children:
                 b.disabled = True
             await interaction.response.edit_message(
-                embed=self.make_embed(True, f"💥 Bust! Lost **{self.bet:,}** {get_currency_abbrev(self.ctx.guild.id)}"),
+                embed=self.make_embed(True, f"Bust — lost **{self.bet:,}** {get_currency_abbrev(self.ctx.guild.id)}"),
                 view=self)
             self.stop()
         else:
             await interaction.response.edit_message(embed=self.make_embed(), view=self)
 
-    @discord.ui.button(label="Stand", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
     async def stand(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.ctx.author.id:
             await interaction.response.send_message("Not your game!", ephemeral=True)
@@ -853,21 +969,16 @@ class BlackjackView(View):
             mult = await get_effective_mult(self.ctx.author.id, self.ctx.guild.id)
             winnings = int(self.bet * mult)
             await db.add_balance(self.ctx.author.id, self.ctx.guild.id, winnings)
-            result = f"✅ You win **{winnings:,}** {abbrev}! (×{mult:.2f})"
-            color = GaraConfig.EMBED_COLOR_SUCCESS
+            result = f"You win **{winnings:,}** {abbrev}"
         elif pv == dv:
             await db.add_balance(self.ctx.author.id, self.ctx.guild.id, self.bet)
-            result = f"🤝 Push! Got **{self.bet:,}** {abbrev} back."
-            color = GaraConfig.EMBED_COLOR_WARN
+            result = f"Push — **{self.bet:,}** {abbrev} returned"
         else:
             await db.sub_balance(self.ctx.author.id, self.ctx.guild.id, self.bet)
-            result = f"❌ Dealer wins. Lost **{self.bet:,}** {abbrev}."
-            color = GaraConfig.EMBED_COLOR_FAIL
+            result = f"Dealer wins — lost **{self.bet:,}** {abbrev}"
         for b in self.children:
             b.disabled = True
-        embed = self.make_embed(True, result)
-        embed.color = color
-        await interaction.response.edit_message(embed=embed, view=self)
+        await interaction.response.edit_message(embed=self.make_embed(True, result), view=self)
         self.stop()
 
 
@@ -875,14 +986,14 @@ class BlackjackView(View):
 
 class CrashView(View):
     def __init__(self, user_id, guild_id, bet, msg_ref):
-        super().__init__(timeout=60)
+        super().__init__(timeout=180)
         self.user_id = user_id
         self.guild_id = guild_id
         self.bet = bet
         self.msg_ref = msg_ref
         self.cashed = False
 
-    @discord.ui.button(label="🚀 Cash Out", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Cash Out", style=discord.ButtonStyle.success)
     async def cashout(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("Not your game!", ephemeral=True)
@@ -899,9 +1010,10 @@ class CrashView(View):
         bot.active_crashes.pop(self.user_id, None)
         button.disabled = True
         abbrev = get_currency_abbrev(self.guild_id)
+        elapsed = int(time.monotonic() - state.get("started_at", time.monotonic()))
         embed = gara_embed(
-            title="🚀 Cashed Out!",
-            description=f"Cashed at **{mult:.2f}x** — won **{winnings:,}** {abbrev}!",
+            title="Cashed Out",
+            description=f"**{mult:.2f}×** at {elapsed}s — won **{winnings:,}** {abbrev}",
             color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.guild_id,
         )
         await interaction.response.edit_message(embed=embed, view=self)
@@ -1345,6 +1457,16 @@ async def on_ready():
     rich_roles_task.start()
 
 
+@bot.listen("on_interaction")
+async def log_interaction(interaction: discord.Interaction):
+    itype = interaction.type.name
+    user = str(interaction.user)
+    guild = interaction.guild.name if interaction.guild else "DM"
+    data = interaction.data or {}
+    name = data.get("name") or data.get("custom_id") or "?"
+    logger.info(f"[interaction] {itype} | {user} | {guild} | {name}")
+
+
 @bot.event
 async def on_message(message):
     if message.author.bot or not message.guild:
@@ -1570,16 +1692,16 @@ async def vc_payout():
         logger.error(f"VC payout loop error: {e}", exc_info=True)
 
 
-@tasks.loop(minutes=5)
+@tasks.loop(seconds=30)
 async def live_leaderboard_update():
-    """Auto-edit activity and clan leaderboard channels every 5 min"""
+    """Auto-edit activity and clan leaderboard channels every 30 seconds"""
     for guild in bot.guilds:
         gid = guild.id
         settings = await db.get_settings(gid)
         if not settings:
             continue
 
-        # Activity leaderboard channel
+        # Activity / GARA leaderboard channel (top 10 users)
         act_ch_id = settings.get("activity_channel", 0)
         act_msg_id = settings.get("activity_msg_id", 0)
         if act_ch_id and act_msg_id:
@@ -1588,20 +1710,33 @@ async def live_leaderboard_update():
                 try:
                     msg = await ch.fetch_message(act_msg_id)
                     rows = await db.get_leaderboard(gid, 10)
-                    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-                    desc = ""
+                    medals = ["01","02","03","04","05","06","07","08","09","10"]
+                    abbrev = get_currency_abbrev(gid)
+                    lines = []
                     for i, (uid, total) in enumerate(rows):
                         member = guild.get_member(uid)
                         name = member.display_name if member else f"User {uid}"
-                        desc += f"{medals[i]} **{name}** — {total:,} {get_currency_abbrev(gid)}\n"
-                    embed = gara_embed(title="💰 Activity Leaderboard", description=desc or "No data.",
-                                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=gid,
-                                       footer="Active voice only — unmuted and undeafened")
+                        udata = await db.get_user(uid, gid)
+                        wm = udata.get("weekly_messages", 0)
+                        wv = udata.get("weekly_vc_minutes", 0)
+                        lines.append(
+                            f"`{medals[i]}` **{name}**\n"
+                            f"       {total:,} {abbrev}  •  {wm} msgs  •  {wv} VC min"
+                        )
+                    desc = "\n".join(lines) or "No data yet."
+                    now_ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    embed = gara_embed(
+                        title="GARA Leaderboard  —  Top 10",
+                        description=desc,
+                        color=GaraConfig.EMBED_COLOR_ACCENT,
+                        guild_id=gid,
+                        footer=f"Updates every 30s  •  Last: {now_ts}",
+                    )
                     await msg.edit(embed=embed)
                 except Exception:
                     pass
 
-        # Clan leaderboard channel
+        # Clan leaderboard channel (top 5 clans)
         clan_ch_id = settings.get("clan_channel", 0)
         clan_msg_id = settings.get("clan_msg_id", 0)
         if clan_ch_id and clan_msg_id:
@@ -1611,15 +1746,26 @@ async def live_leaderboard_update():
                     msg = await ch.fetch_message(clan_msg_id)
                     clans = await db.get_clan_leaderboard(gid, 5)
                     mults = get_clan_mults(gid)
-                    medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
-                    desc = ""
+                    medals = ["01","02","03","04","05"]
+                    lines = []
                     for i, clan in enumerate(clans):
-                        mult_tag = f"**×{mults[i]}** bonus" if i < len(mults) else ""
+                        mult_tag = f"  ×{mults[i]} bonus" if i < len(mults) else ""
                         role = guild.get_role(clan.get("role_id") or 0)
-                        role_str = role.mention if role else clan["name"]
-                        desc += f"{medals[i]} {role_str} — {clan['gold']:,} gold {mult_tag}\n"
-                    embed = gara_embed(title="🏆 Clan Leaderboard (Weekly)", description=desc or "No clans.",
-                                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=gid)
+                        name = role.mention if role else f"**{clan['name']}**"
+                        wm = clan.get("weekly_messages", 0)
+                        lines.append(
+                            f"`{medals[i]}` {name}\n"
+                            f"       {clan['gold']:,} gold  •  {wm} msgs this week{mult_tag}"
+                        )
+                    desc = "\n".join(lines) or "No clans yet."
+                    now_ts = datetime.datetime.now().strftime("%H:%M:%S")
+                    embed = gara_embed(
+                        title="Clan Leaderboard  —  Top 5",
+                        description=desc,
+                        color=GaraConfig.EMBED_COLOR_ACCENT,
+                        guild_id=gid,
+                        footer=f"Updates every 30s  •  Last: {now_ts}",
+                    )
                     await msg.edit(embed=embed)
                 except Exception:
                     pass
@@ -2041,28 +2187,29 @@ async def giveclangold_cmd(ctx, amount: int):
 async def slots_cmd(ctx, bet: int):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
     if bet <= 0 or bet > user["balance"]:
-        return await ctx.reply("Invalid bet!")
+        return await ctx.reply("Invalid bet!", delete_after=5)
     emojis = GaraConfig.SLOTS_EMOJIS
     result = [random.choice(emojis) for _ in range(3)]
     mult = await get_effective_mult(ctx.author.id, ctx.guild.id)
     if result[0] == result[1] == result[2]:
         winnings = int(bet * GaraConfig.SLOTS_JACKPOT_MULTIPLIER * mult)
-        title = "🎰 JACKPOT!"
+        outcome = "JACKPOT"
         color = GaraConfig.EMBED_COLOR_SUCCESS
     elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
         winnings = int(bet * GaraConfig.SLOTS_MATCH_MULTIPLIER * mult)
-        title = "🎰 Winner!"
+        outcome = "WIN"
         color = GaraConfig.EMBED_COLOR_SUCCESS
     else:
         winnings = -bet
-        title = "🎰 No luck..."
+        outcome = "LOSS"
         color = GaraConfig.EMBED_COLOR_FAIL
     await db.add_balance(ctx.author.id, ctx.guild.id, winnings)
     abbrev = get_currency_abbrev(ctx.guild.id)
-    embed = gara_embed(title=title, description=f"**{' | '.join(result)}**", color=color, guild_id=ctx.guild.id)
-    embed.add_field(name="Bet", value=f"{bet:,}", inline=True)
-    embed.add_field(name="Result", value=f"{winnings:+,} {abbrev}", inline=True)
-    embed.add_field(name="Balance", value=f"{user['balance']+winnings:,}", inline=True)
+    embed = gara_embed(
+        title=f"Slots  —  {bet:,} {abbrev}",
+        description=f"```\n[ {result[0]}  {result[1]}  {result[2]} ]\n```\n**{outcome}** — {winnings:+,} {abbrev}",
+        color=color, guild_id=ctx.guild.id,
+    )
     await ctx.reply(embed=embed)
 
 
@@ -2071,22 +2218,23 @@ async def slots_cmd(ctx, bet: int):
 async def mines_cmd(ctx, bet: int):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
     if bet <= 0 or bet > user["balance"]:
-        return await ctx.reply("Invalid bet!")
+        return await ctx.reply("Invalid bet!", delete_after=5)
     existing = await db.get_mines_game(ctx.author.id, ctx.guild.id)
     if existing:
-        return await ctx.reply("You already have an active Mines game!")
-    grid = ["💎"] * 6 + ["💣"] * 3
-    random.shuffle(grid)
-    await db.sub_balance(ctx.author.id, ctx.guild.id, bet)
-    await db.create_mines_game(ctx.author.id, ctx.guild.id, bet, grid)
-    view = MinesView(ctx.author.id, ctx.guild.id, bet, grid, [], 1.0)
+        return await ctx.reply("You already have an active Mines game!", delete_after=5)
+    abbrev = get_currency_abbrev(ctx.guild.id)
+    view = MinesDifficultyView(ctx, bet)
     embed = gara_embed(
-        title="💎 Mines",
-        description=f"Bet: **{bet:,}** {get_currency_abbrev(ctx.guild.id)}\nClick tiles to reveal. Hit a 💣 and you lose!\n\n⬛⬛⬛\n⬛⬛⬛\n⬛⬛⬛",
+        title=f"Mines  —  {bet:,} {abbrev}",
+        description=(
+            "Select a difficulty:\n\n"
+            "**Easy** — 2 mines, ×1.12 per gem\n"
+            "**Medium** — 3 mines, ×1.25 per gem\n"
+            "**Hard** — 5 mines, ×1.50 per gem"
+        ),
         color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
     )
-    msg = await ctx.reply(embed=embed, view=view)
-    view.message = msg
+    await ctx.reply(embed=embed, view=view)
 
 
 @bot.command(name="blackjack", aliases=["bj"])
@@ -2115,36 +2263,51 @@ async def blackjack_cmd(ctx, bet: int):
 async def crash_cmd(ctx, bet: int):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
     if bet <= 0 or bet > user["balance"]:
-        return await ctx.reply("Invalid bet!")
+        return await ctx.reply("Invalid bet!", delete_after=5)
     if ctx.author.id in bot.active_crashes:
-        return await ctx.reply("You already have an active Crash game!")
+        return await ctx.reply("You already have an active Crash game!", delete_after=5)
     settings = await db.get_settings(ctx.guild.id)
     max_mult = settings.get("crash_max_mult", GaraConfig.CRASH_DEFAULT_MAX) or GaraConfig.CRASH_DEFAULT_MAX
     await db.sub_balance(ctx.author.id, ctx.guild.id, bet)
-    # Determine crash point: exponential distribution weighted low
     crash_at = round(random.uniform(1.0, max_mult) * random.uniform(0.5, 1.0), 2)
     crash_at = max(1.01, crash_at)
-    state = {"mult": 1.0, "crashed": False, "cashed": False, "crash_at": crash_at}
+    started = time.monotonic()
+    state = {"mult": 1.0, "crashed": False, "cashed": False, "crash_at": crash_at, "started_at": started}
     bot.active_crashes[ctx.author.id] = state
-    embed = gara_embed(title="🚀 Crash — 1.00×",
-                       description=f"Bet: **{bet:,}** {get_currency_abbrev(ctx.guild.id)}\nCash out before it crashes!",
-                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+    abbrev = get_currency_abbrev(ctx.guild.id)
+
+    def make_crash_embed(mult, elapsed):
+        bar_len = min(int(mult * 4), 20)
+        bar = "█" * bar_len + "░" * (20 - bar_len)
+        desc = (
+            f"```\n"
+            f"  {bar}\n"
+            f"  {mult:.2f}×          {elapsed}s\n"
+            f"```\n"
+            f"**Bet:** {bet:,} {abbrev}  •  **Potential:** {int(bet * mult):,} {abbrev}"
+        )
+        return gara_embed(title="Crash", description=desc,
+                          color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+
     view = CrashView(ctx.author.id, ctx.guild.id, bet, None)
-    msg = await ctx.reply(embed=embed, view=view)
+    msg = await ctx.reply(embed=make_crash_embed(1.0, 0), view=view)
     view.msg_ref = msg
 
     async def tick():
         tick_val = 0.05
         while not state["crashed"] and not state["cashed"]:
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
+            elapsed = int(time.monotonic() - started)
             state["mult"] = round(state["mult"] + tick_val, 2)
-            tick_val = min(tick_val * 1.05, 1.0)
+            tick_val = min(tick_val * 1.04, 0.5)
             if state["mult"] >= state["crash_at"]:
                 state["crashed"] = True
                 bot.active_crashes.pop(ctx.author.id, None)
-                crash_embed = gara_embed(title=f"💥 CRASHED at {state['mult']:.2f}×",
-                                         description=f"Lost **{bet:,}** {get_currency_abbrev(ctx.guild.id)}!",
-                                         color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id)
+                crash_embed = gara_embed(
+                    title=f"Crashed  —  {state['mult']:.2f}×",
+                    description=f"Lost **{bet:,}** {abbrev} after {elapsed}s",
+                    color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id,
+                )
                 for item in view.children:
                     item.disabled = True
                 try:
@@ -2154,11 +2317,8 @@ async def crash_cmd(ctx, bet: int):
                 view.stop()
                 return
             if not state["cashed"]:
-                new_embed = gara_embed(title=f"🚀 Crash — {state['mult']:.2f}×",
-                                        description=f"Bet: **{bet:,}** {get_currency_abbrev(ctx.guild.id)}\nCash out before it crashes!",
-                                        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
                 try:
-                    await msg.edit(embed=new_embed, view=view)
+                    await msg.edit(embed=make_crash_embed(state["mult"], elapsed), view=view)
                 except Exception:
                     state["crashed"] = True
                     return
@@ -2171,10 +2331,14 @@ async def crash_cmd(ctx, bet: int):
 async def coinflip_cmd(ctx, bet: int):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
     if bet <= 0 or bet > user["balance"]:
-        return await ctx.reply("Invalid bet!")
+        return await ctx.reply("Invalid bet!", delete_after=5)
     view = CoinFlipView(ctx, bet)
-    embed = gara_embed(title="🪙 Coin Flip", description="Pick Heads or Tails!",
-                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+    abbrev = get_currency_abbrev(ctx.guild.id)
+    embed = gara_embed(
+        title=f"Coin Flip  —  {bet:,} {abbrev}",
+        description="Pick **Heads** or **Tails**",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+    )
     await ctx.reply(embed=embed, view=view)
 
 
@@ -2577,35 +2741,79 @@ async def warattack_cmd(ctx, war_id: int):
 # MINI-GAMES
 # ══════════════════════════════════════════
 
+class TriviaView(View):
+    def __init__(self, ctx, answer, choices):
+        super().__init__(timeout=15)
+        self.ctx = ctx
+        self.answer = answer
+        self.answered = False
+        for choice in choices:
+            btn = Button(label=choice, style=discord.ButtonStyle.secondary)
+            btn.callback = self._make_cb(choice)
+            self.add_item(btn)
+
+    def _make_cb(self, choice):
+        async def cb(interaction: discord.Interaction):
+            if interaction.user.id != self.ctx.author.id:
+                await interaction.response.send_message("Not your trivia!", ephemeral=True)
+                return
+            if self.answered:
+                return
+            self.answered = True
+            self.stop()
+            for btn in self.children:
+                btn.disabled = True
+                if btn.label == self.answer:
+                    btn.style = discord.ButtonStyle.success
+                elif btn.label == choice and choice != self.answer:
+                    btn.style = discord.ButtonStyle.danger
+            if choice == self.answer:
+                reward = random.randint(100, 500)
+                await db.add_balance(self.ctx.author.id, self.ctx.guild.id, reward)
+                clan = await db.get_user_clan(self.ctx.author.id, self.ctx.guild.id)
+                if clan:
+                    async with aiosqlite.connect(db.db_path) as conn:
+                        await conn.execute("UPDATE clans SET gold=gold+500 WHERE clan_id=?", (clan["clan_id"],))
+                        await conn.commit()
+                embed = gara_embed(title="Correct",
+                    description=f"**+{reward:,}** {get_currency_abbrev(self.ctx.guild.id)}  •  Clan +500 gold",
+                    color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.ctx.guild.id)
+            else:
+                embed = gara_embed(title="Wrong",
+                    description=f"Answer: **{self.answer}**",
+                    color=GaraConfig.EMBED_COLOR_FAIL, guild_id=self.ctx.guild.id)
+            await interaction.response.edit_message(embed=embed, view=self)
+        return cb
+
+    async def on_timeout(self):
+        for btn in self.children:
+            btn.disabled = True
+            if btn.label == self.answer:
+                btn.style = discord.ButtonStyle.success
+        if self.message:
+            embed = gara_embed(title="Time's Up",
+                description=f"Answer: **{self.answer}**",
+                color=GaraConfig.EMBED_COLOR_WARN, guild_id=self.ctx.guild.id)
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except Exception:
+                pass
+
+
 @bot.command(name="trivia")
 @commands.cooldown(1, 10, commands.BucketType.user)
 async def trivia_cmd(ctx):
-    q, answer = random.choice(GaraConfig.TRIVIA_QUESTIONS)
-    embed = gara_embed(title="🧠 Trivia",
-                       description=f"{q}\n\nYou have **15 seconds** to answer!",
-                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
-    await ctx.reply(embed=embed)
-    def check(m):
-        return m.author.id == ctx.author.id and m.channel.id == ctx.channel.id
-    try:
-        msg = await bot.wait_for("message", timeout=15.0, check=check)
-        if msg.content.lower().strip() == answer.lower():
-            reward = random.randint(100, 500)
-            await db.add_balance(ctx.author.id, ctx.guild.id, reward)
-            clan = await db.get_user_clan(ctx.author.id, ctx.guild.id)
-            if clan:
-                async with aiosqlite.connect(db.db_path) as conn:
-                    await conn.execute("UPDATE clans SET gold=gold+500 WHERE clan_id=?", (clan["clan_id"],))
-                    await conn.commit()
-            await ctx.reply(embed=gara_embed(title="✅ Correct!",
-                description=f"Won **{reward:,}** {get_currency_abbrev(ctx.guild.id)}! Clan +500 gold.",
-                color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id))
-        else:
-            await ctx.reply(embed=gara_embed(title="❌ Wrong!",
-                description=f"Answer: **{answer}**", color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id))
-    except asyncio.TimeoutError:
-        await ctx.reply(embed=gara_embed(title="⏰ Time's Up!",
-            description=f"Answer: **{answer}**", color=GaraConfig.EMBED_COLOR_WARN, guild_id=ctx.guild.id))
+    q, answer, wrongs = random.choice(GaraConfig.TRIVIA_QUESTIONS)
+    choices = random.sample(wrongs, min(3, len(wrongs))) + [answer]
+    random.shuffle(choices)
+    view = TriviaView(ctx, answer, choices)
+    embed = gara_embed(
+        title="Trivia",
+        description=f"{q}\n\n*15 seconds to answer*",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+    )
+    msg = await ctx.reply(embed=embed, view=view)
+    view.message = msg
 
 
 @bot.command(name="numguess")
@@ -2722,7 +2930,7 @@ def parse_duration(s: str) -> Optional[timedelta]:
 @commands.cooldown(1, 10, commands.BucketType.user)
 async def giveaway_cmd(ctx, duration: str, *, prize: str):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     delta = parse_duration(duration)
     if not delta:
         return await ctx.reply("Invalid duration! Use e.g. `1d`, `2h`, `30m`")
@@ -2829,7 +3037,7 @@ async def help_cmd(ctx):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def givemoney_cmd(ctx, member: discord.Member, amount: int):
     if not is_admin(ctx):
-        return await ctx.reply("No permission!")
+        return
     await db.add_balance(member.id, ctx.guild.id, amount)
     await ctx.reply(embed=gara_embed(title="Admin Transfer",
         description=f"Gave **{amount:,}** {get_currency_abbrev(ctx.guild.id)} to {member.mention}!",
@@ -2840,7 +3048,7 @@ async def givemoney_cmd(ctx, member: discord.Member, amount: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def takemoney_cmd(ctx, member: discord.Member, amount: int):
     if not is_admin(ctx):
-        return await ctx.reply("No permission!")
+        return
     await db.sub_balance(member.id, ctx.guild.id, amount)
     await ctx.reply(embed=gara_embed(title="Admin Deduction",
         description=f"Took **{amount:,}** {get_currency_abbrev(ctx.guild.id)} from {member.mention}!",
@@ -2851,7 +3059,7 @@ async def takemoney_cmd(ctx, member: discord.Member, amount: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setprefix_cmd(ctx, new_prefix: str):
     if not is_admin(ctx):
-        return await ctx.reply("No permission!")
+        return
     if len(new_prefix) > 5:
         return await ctx.reply("Max 5 chars!")
     await db.set_setting(ctx.guild.id, prefix=new_prefix)
@@ -2864,7 +3072,7 @@ async def setprefix_cmd(ctx, new_prefix: str):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setcurrency_cmd(ctx, name: str, abbrev: str):
     if not is_admin(ctx):
-        return await ctx.reply("No permission!")
+        return
     await db.set_setting(ctx.guild.id, currency_name=name, currency_abbrev=abbrev)
     s = bot.guild_settings.setdefault(ctx.guild.id, {})
     s["currency_name"] = name
@@ -2877,7 +3085,7 @@ async def setcurrency_cmd(ctx, name: str, abbrev: str):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def createclan_cmd(ctx, name: str, role: discord.Role):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     async with aiosqlite.connect(db.db_path) as conn:
         try:
             await conn.execute(
@@ -2896,7 +3104,7 @@ async def createclan_cmd(ctx, name: str, role: discord.Role):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def giveclan_cmd(ctx, clan_name: str, amount: int):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     clan = await db.get_clan(name=clan_name, guild_id=ctx.guild.id)
     if not clan:
         return await ctx.reply("Clan not found!")
@@ -2912,17 +3120,8 @@ async def giveclan_cmd(ctx, clan_name: str, amount: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setroleschannel_cmd(ctx, channel: discord.TextChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
-    tiers = get_tiers(ctx.guild.id)
-    sorted_tiers = sorted(tiers, key=lambda x: x["hours"], reverse=True)  # Inverted: highest first
-    abbrev = get_currency_abbrev(ctx.guild.id)
-    desc = ""
-    for t in sorted_tiers:
-        desc += f"**{t['name']}** — {t['hours']}h | {t['daily']:,} {abbrev}/day | ×{t['mult']}\n"
-    embed = gara_embed(title="🏅 Earn Roles",
-                       description=desc,
-                       color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
-                       footer="Active voice time only — unmuted and undeafened")
+        return
+    embed = _build_roles_embed(ctx.guild)
     msg = await channel.send(embed=embed)
     await db.set_setting(ctx.guild.id, roles_channel=channel.id, roles_msg_id=msg.id)
     await ctx.reply(f"Roles UI posted in {channel.mention}!")
@@ -2932,37 +3131,29 @@ async def setroleschannel_cmd(ctx, channel: discord.TextChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def updaterolesui_cmd(ctx):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     ch_id = settings.get("roles_channel", 0)
     msg_id = settings.get("roles_msg_id", 0)
     if not ch_id or not msg_id:
-        return await ctx.reply("No roles channel set! Use `.setroleschannel #channel` first.")
+        return await ctx.reply("No roles channel set! Use `.setroleschannel #channel` first.", delete_after=5)
     ch = ctx.guild.get_channel(ch_id)
     if not ch:
-        return await ctx.reply("Roles channel not found!")
+        return await ctx.reply("Roles channel not found!", delete_after=5)
     try:
         msg = await ch.fetch_message(msg_id)
-        tiers = get_tiers(ctx.guild.id)
-        sorted_tiers = sorted(tiers, key=lambda x: x["hours"], reverse=True)
-        abbrev = get_currency_abbrev(ctx.guild.id)
-        desc = ""
-        for t in sorted_tiers:
-            desc += f"**{t['name']}** — {t['hours']}h | {t['daily']:,} {abbrev}/day | ×{t['mult']}\n"
-        embed = gara_embed(title="🏅 Earn Roles", description=desc,
-                           color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
-                           footer="Active voice time only — unmuted and undeafened")
+        embed = _build_roles_embed(ctx.guild)
         await msg.edit(embed=embed)
-        await ctx.reply("✅ Roles UI updated!")
+        await ctx.reply("Roles UI updated!", delete_after=5)
     except Exception as e:
-        await ctx.reply(f"Failed: {e}")
+        await ctx.reply(f"Failed: {e}", delete_after=8)
 
 
 @bot.command(name="setactivitychannel")
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setactivitychannel_cmd(ctx, channel: discord.TextChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     embed = gara_embed(title="💰 Activity Leaderboard",
                        description="Loading...", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
                        footer="Active voice only — unmuted and undeafened")
@@ -2976,7 +3167,7 @@ async def setactivitychannel_cmd(ctx, channel: discord.TextChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setclanchannel_cmd(ctx, channel: discord.TextChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     embed = gara_embed(title="🏆 Clan Leaderboard",
                        description="Loading...", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
     msg = await channel.send(embed=embed)
@@ -2989,7 +3180,7 @@ async def setclanchannel_cmd(ctx, channel: discord.TextChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setblankui_cmd(ctx, channel: discord.TextChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     embed = discord.Embed(description="\u200b", color=0x000000)
     msg = await channel.send(embed=embed)
     await db.set_setting(ctx.guild.id, blank_ui_channel=channel.id, blank_ui_msg_id=msg.id,
@@ -3001,7 +3192,7 @@ async def setblankui_cmd(ctx, channel: discord.TextChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def editblankui_cmd(ctx, field: str, *, value: str):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     ch_id = settings.get("blank_ui_channel", 0)
     msg_id = settings.get("blank_ui_msg_id", 0)
@@ -3042,7 +3233,7 @@ async def editblankui_cmd(ctx, field: str, *, value: str):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setrandomvc_cmd(ctx, channel: discord.VoiceChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     await db.set_setting(ctx.guild.id, random_vc=channel.id)
     bot.guild_settings.setdefault(ctx.guild.id, {})["random_vc"] = channel.id
     await ctx.reply(f"Random VC set to **{channel.name}**! Members who join will be moved to a random other VC.")
@@ -3052,7 +3243,7 @@ async def setrandomvc_cmd(ctx, channel: discord.VoiceChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def blacklistvc_cmd(ctx, channel: discord.VoiceChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     try:
         bl = json.loads(settings.get("vc_blacklist", "[]"))
@@ -3068,7 +3259,7 @@ async def blacklistvc_cmd(ctx, channel: discord.VoiceChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def unblacklistvc_cmd(ctx, channel: discord.VoiceChannel):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     try:
         bl = json.loads(settings.get("vc_blacklist", "[]"))
@@ -3083,7 +3274,7 @@ async def unblacklistvc_cmd(ctx, channel: discord.VoiceChannel):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def lockcycle_cmd(ctx, open_time: str, close_time: str, channel: discord.TextChannel = None):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     target = channel or ctx.channel
     def parse_time(s):
         s = s.upper().strip()
@@ -3119,7 +3310,7 @@ async def lockcycle_cmd(ctx, open_time: str, close_time: str, channel: discord.T
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setclanmult_cmd(ctx, rank: int, mult: float):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if rank not in (1, 2, 3):
         return await ctx.reply("Rank must be 1, 2, or 3.")
     mults = get_clan_mults(ctx.guild.id)
@@ -3137,7 +3328,7 @@ async def setclanmult_cmd(ctx, rank: int, mult: float):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def settiername_cmd(ctx, tier_num: int, *, name: str):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if not 1 <= tier_num <= 5:
         return await ctx.reply("Tier must be 1-5.")
     tiers = get_tiers(ctx.guild.id)
@@ -3151,7 +3342,7 @@ async def settiername_cmd(ctx, tier_num: int, *, name: str):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def settierrole_cmd(ctx, tier_num: int, role: discord.Role):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if not 1 <= tier_num <= 5:
         return await ctx.reply("Tier must be 1-5.")
     tiers = get_tiers(ctx.guild.id)
@@ -3165,7 +3356,7 @@ async def settierrole_cmd(ctx, tier_num: int, role: discord.Role):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def settierhours_cmd(ctx, tier_num: int, hours: float):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if not 1 <= tier_num <= 5:
         return await ctx.reply("Tier must be 1-5.")
     tiers = get_tiers(ctx.guild.id)
@@ -3179,7 +3370,7 @@ async def settierhours_cmd(ctx, tier_num: int, hours: float):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def settiercoins_cmd(ctx, tier_num: int, coins: int):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if not 1 <= tier_num <= 5:
         return await ctx.reply("Tier must be 1-5.")
     tiers = get_tiers(ctx.guild.id)
@@ -3193,7 +3384,7 @@ async def settiercoins_cmd(ctx, tier_num: int, coins: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setrichrole_cmd(ctx, rank: int, role: discord.Role):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if not 1 <= rank <= 5:
         return await ctx.reply("Rank must be 1-5.")
     settings = await db.get_settings(ctx.guild.id)
@@ -3212,7 +3403,7 @@ async def setrichrole_cmd(ctx, rank: int, role: discord.Role):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def addshoprole_cmd(ctx, role: discord.Role, price: int):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     try:
         shop_roles = json.loads(settings.get("shop_roles", "[]"))
@@ -3230,7 +3421,7 @@ async def addshoprole_cmd(ctx, role: discord.Role, price: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def removeshoprole_cmd(ctx, role: discord.Role):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     settings = await db.get_settings(ctx.guild.id)
     try:
         shop_roles = json.loads(settings.get("shop_roles", "[]"))
@@ -3245,7 +3436,7 @@ async def removeshoprole_cmd(ctx, role: discord.Role):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setgiveaway_cmd(ctx, channel: discord.TextChannel, *, prize: str):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     await db.set_setting(ctx.guild.id, giveaway_channel=channel.id, giveaway_prize=prize)
     await ctx.reply(f"Weekly auto-giveaway set in {channel.mention} with prize: **{prize}**.")
 
@@ -3254,7 +3445,7 @@ async def setgiveaway_cmd(ctx, channel: discord.TextChannel, *, prize: str):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def setcrashmult_cmd(ctx, max_mult: float):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     if max_mult < 2.0:
         return await ctx.reply("Min crash ceiling is 2.0×")
     await db.set_setting(ctx.guild.id, crash_max_mult=max_mult)
@@ -3266,7 +3457,7 @@ async def setcrashmult_cmd(ctx, max_mult: float):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def spin_cmd(ctx):
     if not is_admin(ctx):
-        return await ctx.reply("Admin only!")
+        return
     clans = await db.get_clan_leaderboard(ctx.guild.id, 1)
     if not clans:
         return await ctx.reply("No clans active!")
