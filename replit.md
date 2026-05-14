@@ -1,45 +1,57 @@
-# [Project name]
+# GARA Discord Bot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+All-in-One Economy, Casino, Clan & Fame Discord bot. Built in Python with per-guild economy, casino games, a clan competition system, fame/aura system, VC activity rewards, and an in-game shop.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
+- **Bot entry point:** `python main.py`
+- **Workflow:** `GARA Discord Bot` (console output)
+- **Required secret:** `DISCORD_TOKEN` — your Discord bot token from the Developer Portal
+- **Database:** SQLite (`gara.db`) — created automatically on first run
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- Python 3.11
+- `discord.py` 2.x — bot framework
+- `aiosqlite` — async SQLite database
+- `flask` — keep-alive web server (health check endpoint)
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `main.py` — entire bot: config, DB, events, commands, Flask health check
+- `gara.db` — SQLite database (auto-created, not committed)
+
+## Features
+
+- **Economy:** `.balance`, `.deposit`, `.withdraw`, `.give`, `.daily`, `.work`, `.rob`, `.leaderboard`
+- **Casino:** `.slots <bet>`, `.mines start/pick/cashout/all <bet>`
+- **Fame:** `.fame`, `.boost @user`, `.neg @user`, `.famous`
+- **Clans:** `.clans`, `.clanstats`, `.joinclan`, `.leaveclan`, `.mygold`, `.createclan` (admin)
+- **Shop:** `.shop`, `.buy <item>`
+- **VC Activity:** Automatic role rewards based on voice channel hours
+- **Admin:** `.givemoney`, `.takemoney`, `.setprefix`, `.setcurrency`, `.spin`, `.lockcycle`
+- **Help:** `.help` (paginated button UI)
+- **Battle:** `.battle @user`
+- **Stats:** `.stats`
+
+## Bot Prefix
+
+Default: `.` (configurable per-guild with `.setprefix`)
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
-
-## Product
-
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Single-file bot (`main.py`) for straightforward Railway/Replit deployment
+- Per-guild isolation: all economy data keyed by `(user_id, guild_id)`
+- SQLite with aiosqlite for zero-dependency async persistence
+- Flask keep-alive thread uses `PORT` env var (defaults to 3000) to avoid port conflicts
+- Admin check: guild Administrators OR IDs listed in `GaraConfig.ADMIN_IDS`
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+- Single-file Python deployment (no splitting into cogs unless asked)
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
+- PyNaCl not installed — voice features disabled (expected, no voice commands used)
+- `gara.db` is created in the working directory; on Railway, use a volume mount to persist it
+- The Flask health page is at the root path `/` on the PORT the bot binds to
