@@ -1,0 +1,65 @@
+I need you to add the following features to my Discord economy bot. Please implement all of them in a single coherent update:
+
+1. RATE LIMITING — Add a global 300ms cooldown per user before every command via before_invoke. Duplicate triggers should be silently dropped with no extra replies.
+
+2. FAILED COMMAND SUGGESTIONS — On on_command_error, catch CommandNotFound and send a short ephemeral-style correction (auto-deletes in 8s) with the closest matching command. Missing argument errors should also get a clean hint.
+
+3. EARN ROLES UI (INVERTED) — .setroleschannel #channel should post a live embed showing all tier requirements, daily coins, and multipliers, but render Tier 5 at the TOP down to Tier 1 at the BOTTOM (inverted order). The footer must read: "Active voice time only — unmuted and undeafened". Use .updaterolesui to refresh an existing embed.
+
+4. VC STATS — Only count voice time when users are fully unmuted AND undeafened. The leaderboard embeds, stats command, and earn roles footer must all carry this note. The coin-earning loop (2 GC/min) must also enforce this rule.
+
+5. RANDOM VC — Add .setrandomvc #vc-channel so anyone who joins gets moved to a random other VC. Add two admin commands: .blacklistvc #channel to exclude channels, .unblacklistvc #channel to re-add them. The redirect should only pick unlocked channels. If nothing's available, send the member a clean DM.
+
+6. LEADERBOARD CHANNELS — .setactivitychannel and .setclanchannel should post a live embed that auto-edits every 5 minutes. Activity LB shows top 10, Clan LB shows top 5 with weekly multiplier tags.
+
+7. LOCK CYCLE AM/PM — .lockcycle 9:00AM 10:00PM [#channel] — both times must require explicit AM/PM; the bot rejects ambiguous input.
+
+8. BATTLE — Power is now fully randomized per fight: (100-1000 base + aura × 10 + 1-500 bonus).
+
+9. CRASH LIVE TIMER — An async task ticks every 2 seconds, editing the embed with the current multiplier in real time. Cash Out button is always visible. Add .setcrashmult <max> for admins to set the ceiling.
+
+10. CLAN 1V1 MINI-GAMES — Three games earning 15,000 clan gold to the winner's clan: .tictactoe @user (button board), .rps @user (hidden picks, revealed simultaneously), .highcard @user (draw a card, highest wins).
+
+11. CLAN WEEKLY GOLD SPLIT — At the end of each week, the clan's accumulated gold is divided equally among all members and added to their wallets. Gold resets to 0 after the split.
+
+12. TOP 3 CLAN MULTIPLIERS — .setclanmult <rank 1-3> <mult> — defaults: 2.5x / 2.0x / 1.5x. Show alongside each clan in .clanstats.
+
+13. STACKING MULTIPLIERS — All three sources (tier, personal 2.5x buy, top-clan) multiply together. Buy with .buy mult for 4,000,000 GC or 20% of total balance.
+
+14. PROFILE COMMAND — .profile [@user] shows a full card: wallet, vault, total, aura, VC hours, messages, tier, leaderboard rank, effective multiplier, and clan.
+
+15. BLANK UI CHANNEL — .setblankui #channel posts a fully blank embed there. .editblankui title|description|color <value> live-edits it. Support hex colors and animated emoji strings anywhere in the text.
+
+16. WEB DASHBOARD — The Flask keep-alive serves a live black/white dashboard at the bot's web URL showing: server count, user count, clans, GC in circulation, top 10 richest, top 5 clans, and weekly activity — auto-refreshes every 30 seconds.
+
+17. MINI-GAMES (5) — Trivia, Number Guess, Dice Roll, Word Scramble, Coin Flip. All earn clan gold on wins.
+
+18. GIVEAWAY — .giveaway <1d/2h/30m> <prize> starts one manually. Top 10 richest automatically get 2 entries. Weekly auto-giveaway via .setgiveaway #channel <prize>.
+
+19. WEEKLY RESET — Every 7 days: weekly message/VC counters reset for both users and clans, activity leaderboards post to configured channels, and auto-giveaway fires.
+
+20. ACTIVITY LEADERBOARDS — .garalb (overall), .clanlb (clans with roles). Both post to preset channels on weekly reset. Admin sets channels via .setactivitychannel / .setclanchannel.
+
+21. CLAN STATS — .clanstats shows full leaderboard with messages, VC minutes, clan gold, role mention, plus most active chat and VC channels below.
+
+22. CLAN WARS — .clanwar <clan> declares war, .warattack <war_id> battles. Winners earn clan gold. Battle outcomes factor in balance + aura + random variance.
+
+23. ADMIN CLAN TOOLS — .giveclan <name> <amount> gives gold directly to any clan.
+
+24. SHOP OVERHAUL — Remove rings and marriage. Mute starts at 150,000 GC or 10% of total wealth (whichever is higher). Up to 5 preset roles via .addshoprole / .removeshoprole.
+
+25. TIER SYSTEM — 5 tiers (Tier 1 → VIP), each with preset hours, daily coins, and gamble multipliers. All configurable via .settiername, .settierrole, .settierhours, .settiercoins.
+
+26. TOP 5 RICH ROLES — .setrichrole <1-5> <@role> maps a role to a leaderboard rank. Roles assigned daily.
+
+27. ADMIN COMMANDS HIDDEN — .help only shows the Admin page to users with Manage Server or Administrator permissions.
+
+28. COIN EARNING — 1 GC per message (30s cooldown), 2 GC per minute in VC. Both feed into weekly activity tracking.
+
+29. MINES — Full 3×3 button grid. Tap tiles to reveal, multiplier grows with each safe tile, Cash Out button always visible.
+
+30. CASINO EXPANDED — 3 new button-interactive games: Blackjack (Hit/Stand), Crash (Cash Out before it crashes), Coin Flip (Heads/Tails). All casino payouts multiplied by your tier.
+
+31. .giveclangold command — Let members donate their own wallet balance directly into their clan's gold pool to speed up the weekly split.
+
+Please implement all features to work together cohesively. The bot uses discord.py with a prefix "." and stores data in a JSON-based or SQLite database. Make sure all commands are properly registered and the bot starts with no syntax errors.
