@@ -1195,60 +1195,125 @@ class HelpView(View):
         ]},
     ]
 
+    # page = -1  → overview/menu
+    # page = 0..N-1 → category index
+
     def __init__(self, ctx):
         super().__init__(timeout=120)
         self.ctx = ctx
-        self.page = 0
+        self.page = -1
         visible = [c for c in self.CATEGORIES if not c.get("admin_only") or is_admin(ctx)]
         self.visible = visible
-        self.total_pages = len(visible) + 1
         self._build()
+
+    def _auth(self, interaction) -> bool:
+        return interaction.user.id == self.ctx.author.id
+
+    # ── button builders ──────────────────────────────────────────────────────
 
     def _build(self):
         self.clear_items()
-        if self.page > 0:
-            b = Button(label="◀ Back", style=discord.ButtonStyle.secondary)
-            b.callback = self.go_back
-            self.add_item(b)
-        for i, cat in enumerate(self.visible):
-            if self.page == 0:
-                btn = Button(label=f"{cat['emoji']} {cat['name']}", style=discord.ButtonStyle.primary)
-                btn.callback = self._make_cat_cb(i + 1)
-                self.add_item(btn)
+        if self.page == -1:
+            self._build_menu()
+        else:
+            self._build_browse()
 
-    def _make_cat_cb(self, idx):
+    def _build_menu(self):
+        for i, cat in enumerate(self.visible):
+            btn = Button(
+                label=f"{cat['emoji']} {cat['name']}",
+                style=discord.ButtonStyle.primary,
+                row=i // 4,
+            )
+            btn.callback = self._make_jump_cb(i)
+            self.add_item(btn)
+
+    def _build_browse(self):
+        n = len(self.visible)
+        prev_btn = Button(
+            label="◀ Prev",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.page == 0),
+            row=0,
+        )
+        prev_btn.callback = self._prev
+        self.add_item(prev_btn)
+
+        menu_btn = Button(label="☰ Menu", style=discord.ButtonStyle.primary, row=0)
+        menu_btn.callback = self._to_menu
+        self.add_item(menu_btn)
+
+        next_btn = Button(
+            label="Next ▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.page == n - 1),
+            row=0,
+        )
+        next_btn.callback = self._next
+        self.add_item(next_btn)
+
+    # ── callbacks ────────────────────────────────────────────────────────────
+
+    def _make_jump_cb(self, idx):
         async def cb(interaction):
-            if interaction.user.id != self.ctx.author.id:
+            if not self._auth(interaction):
                 await interaction.response.send_message("Not your help menu!", ephemeral=True)
                 return
             self.page = idx
             self._build()
-            await interaction.response.edit_message(embed=self._cat_embed(idx - 1), view=self)
+            await interaction.response.edit_message(embed=self._cat_embed(), view=self)
         return cb
 
-    async def go_back(self, interaction):
-        if interaction.user.id != self.ctx.author.id:
+    async def _prev(self, interaction):
+        if not self._auth(interaction):
             await interaction.response.send_message("Not your help menu!", ephemeral=True)
             return
-        self.page = 0
+        self.page = max(0, self.page - 1)
+        self._build()
+        await interaction.response.edit_message(embed=self._cat_embed(), view=self)
+
+    async def _next(self, interaction):
+        if not self._auth(interaction):
+            await interaction.response.send_message("Not your help menu!", ephemeral=True)
+            return
+        self.page = min(len(self.visible) - 1, self.page + 1)
+        self._build()
+        await interaction.response.edit_message(embed=self._cat_embed(), view=self)
+
+    async def _to_menu(self, interaction):
+        if not self._auth(interaction):
+            await interaction.response.send_message("Not your help menu!", ephemeral=True)
+            return
+        self.page = -1
         self._build()
         await interaction.response.edit_message(embed=self.main_embed(), view=self)
 
-    def main_embed(self):
-        prefix = get_prefix_for_guild(self.ctx.guild.id if self.ctx.guild else None)
-        cats = "\n".join(f"{c['emoji']} **{c['name']}**" for c in self.visible)
-        return gara_embed(title="GARA Help", description=f"Pick a category below.\n\n{cats}",
-                          color=GaraConfig.EMBED_COLOR_ACCENT,
-                          guild_id=self.ctx.guild.id if self.ctx.guild else None)
+    # ── embeds ───────────────────────────────────────────────────────────────
 
-    def _cat_embed(self, idx):
-        cat = self.visible[idx]
-        prefix = get_prefix_for_guild(self.ctx.guild.id if self.ctx.guild else None)
+    def main_embed(self):
+        guild_id = self.ctx.guild.id if self.ctx.guild else None
+        cats = "\n".join(f"{c['emoji']} **{c['name']}**" for c in self.visible)
+        return gara_embed(
+            title="📖 GARA Help",
+            description=f"Select a category to browse, or use **◀ Prev / Next ▶** inside any category.\n\n{cats}",
+            color=GaraConfig.EMBED_COLOR_ACCENT,
+            guild_id=guild_id,
+        )
+
+    def _cat_embed(self):
+        cat = self.visible[self.page]
+        guild_id = self.ctx.guild.id if self.ctx.guild else None
+        prefix = get_prefix_for_guild(guild_id)
         cmds = "\n".join(f"`{prefix}{cmd}` — {desc}" for cmd, desc in cat["commands"])
-        return gara_embed(title=f"{cat['emoji']} {cat['name']}",
-                          description=cmds or "No commands.",
-                          color=GaraConfig.EMBED_COLOR_ACCENT,
-                          guild_id=self.ctx.guild.id if self.ctx.guild else None)
+        n = len(self.visible)
+        e = gara_embed(
+            title=f"{cat['emoji']} {cat['name']}",
+            description=cmds or "No commands.",
+            color=GaraConfig.EMBED_COLOR_ACCENT,
+            guild_id=guild_id,
+        )
+        e.set_footer(text=f"Category {self.page + 1} of {n}  •  Use ◀ Prev / Next ▶ to browse")
+        return e
 
 
 # ══════════════════════════════════════════
@@ -1407,10 +1472,9 @@ async def global_rate_limit(ctx):
     now = time.monotonic()
     key = ctx.author.id
     last = bot._last_cmd_time.get(key, 0.0)
-    if now - last < 0.3:
-        # Silently drop
+    if now - last < 1.25:
         raise commands.CommandOnCooldown(
-            commands.Cooldown(1, 0.3), 0.3 - (now - last), commands.BucketType.user
+            commands.Cooldown(1, 1.25), 1.25 - (now - last), commands.BucketType.user
         )
     bot._last_cmd_time[key] = now
 
@@ -1418,8 +1482,8 @@ async def global_rate_limit(ctx):
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
-        if error.retry_after < 0.5:
-            return  # Silently drop rate limit
+        if error.retry_after < 0.2:
+            return  # Silently drop only extreme spam
         await ctx.reply(f"⏰ Slow down! Try again in `{error.retry_after:.1f}s`.", delete_after=5)
     elif isinstance(error, commands.CommandNotFound):
         cmd_name = ctx.invoked_with
