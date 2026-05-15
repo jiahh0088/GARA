@@ -57,11 +57,11 @@ class GaraConfig:
 
     STARTING_BALANCE = 1000
     STARTING_VAULT = 0
-    DAILY_REWARD_MIN = 100
-    DAILY_REWARD_MAX = 500
-    WORK_COOLDOWN_HOURS = 4
-    WORK_REWARD_MIN = 50
-    WORK_REWARD_MAX = 200
+    DAILY_REWARD_MIN = 600
+    DAILY_REWARD_MAX = 2500
+    WORK_COOLDOWN_HOURS = 2
+    WORK_REWARD_MIN = 350
+    WORK_REWARD_MAX = 1200
     ROB_CHANCE = 0.4
     ROB_COOLDOWN_HOURS = 2
 
@@ -153,6 +153,8 @@ class Database:
                 ("total_messages", "INTEGER DEFAULT 0"),
                 ("last_message_earn", "TEXT"),
                 ("mult_bought", "INTEGER DEFAULT 0"),
+                ("login_streak", "INTEGER DEFAULT 0"),
+                ("last_login", "TEXT"),
             ]:
                 try:
                     await db.execute(f"ALTER TABLE users ADD COLUMN {col} {defn}")
@@ -421,6 +423,17 @@ class Database:
             ) as c:
                 return await c.fetchall()
 
+    async def get_activity_leaderboard(self, guild_id: int, limit: int = 10):
+        """Rank users by weekly_messages + weekly_vc_minutes (GARA activity score)."""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                """SELECT user_id, (weekly_messages + weekly_vc_minutes) as score
+                   FROM users WHERE guild_id=?
+                   ORDER BY score DESC LIMIT ?""",
+                (guild_id, limit),
+            ) as c:
+                return await c.fetchall()
+
     async def get_fame_leaderboard(self, guild_id: int, limit: int = 10):
         async with aiosqlite.connect(self.db_path) as db:
             async with db.execute(
@@ -573,6 +586,7 @@ bot.leaderboard_messages: Dict[int, object] = {}
 bot.lockcycles: Dict[int, dict] = {}
 bot.active_crashes: Dict[int, dict] = {}   # user_id -> crash state
 bot._last_cmd_time: Dict[int, float] = {}   # rate limiting
+bot.duel_usage: Dict[int, list] = {}        # user_id -> [timestamps] for duel rate limiting
 db = Database()
 
 
@@ -1028,11 +1042,11 @@ class CoinFlipView(View):
         self.ctx = ctx
         self.bet = bet
 
-    @discord.ui.button(label="🪙 Heads", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Heads", style=discord.ButtonStyle.primary)
     async def heads(self, interaction, button):
         await self._resolve(interaction, "heads")
 
-    @discord.ui.button(label="🪙 Tails", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Tails", style=discord.ButtonStyle.secondary)
     async def tails(self, interaction, button):
         await self._resolve(interaction, "tails")
 
@@ -1209,7 +1223,7 @@ class LeaderboardView(View):
             rows = await db.get_leaderboard(guild_id, 10)
             embed = gara_embed(title="💰 Wealth Leaderboard", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=guild_id,
                                footer="Active voice only — unmuted and undeafened")
-            medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+            medals = ["`01`","`02`","`03`","`04`","`05`","`06`","`07`","`08`","`09`","`10`"]
             desc = ""
             for i, (uid, total) in enumerate(rows):
                 member = self.ctx.guild.get_member(uid)
@@ -1221,7 +1235,7 @@ class LeaderboardView(View):
             mults = get_clan_mults(guild_id)
             embed = gara_embed(title="🏆 Clan Leaderboard", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=guild_id)
             desc = ""
-            medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
+            medals = ["`01`","`02`","`03`","`04`","`05`"]
             for i, clan in enumerate(clans):
                 mult_tag = f"(×{mults[i]})" if i < len(mults) else ""
                 desc += f"{medals[i]} **{clan['name']}** — {clan['gold']:,} gold {mult_tag}\n"
@@ -1245,43 +1259,43 @@ class LeaderboardView(View):
 
 class HelpView(View):
     CATEGORIES = [
-        {"name": "Economy",  "emoji": "💰", "commands": [
+        {"name": "Economy", "commands": [
             ("balance [@user]", "Check balance"), ("deposit <amt>", "Deposit to vault"),
             ("withdraw <amt>", "Withdraw from vault"), ("give @user <amt>", "Send coins"),
-            ("daily", "Daily reward"), ("work", "Earn coins"),
+            ("daily", "Daily reward + streak"), ("work", "Earn coins"),
             ("rob @user", "Try to rob someone"), ("leaderboard", "Wealth top 10"),
             ("profile [@user]", "Full profile card"), ("giveclangold <amt>", "Donate to clan pool"),
         ]},
-        {"name": "Casino",   "emoji": "🎰", "commands": [
-            ("slots <bet>", "Slot machine"), ("mines <bet>", "Mines button grid"),
-            ("blackjack <bet>", "Hit or Stand"), ("crash <bet>", "Crash rocket game"),
+        {"name": "Casino", "commands": [
+            ("slots <bet>", "Slot machine"), ("mines <bet>", "Mines — pick difficulty"),
+            ("blackjack <bet>", "Hit or Stand"), ("crash <bet> [auto]", "Crash game with optional auto-cashout"),
             ("coinflip <bet>", "Heads or Tails"),
         ]},
-        {"name": "Fame",     "emoji": "⭐", "commands": [
+        {"name": "Fame", "commands": [
             ("fame [@user]", "Aura profile"), ("boost @user", "Give +1 aura"),
             ("neg @user", "Give -1 aura"), ("famous", "Fame leaderboard"),
         ]},
-        {"name": "Clans",    "emoji": "🏰", "commands": [
-            ("clans", "Clan leaderboard"), ("clanstats", "Full clan activity"),
+        {"name": "Clans", "commands": [
+            ("clans", "Clan activity leaderboard"), ("clanstats", "Full clan stats"),
             ("joinclan <name>", "Join a clan"), ("leaveclan", "Leave your clan"),
             ("mygold", "Your gold info"), ("tictactoe @user", "Clan mini-game"),
             ("rps @user", "Rock Paper Scissors"), ("highcard @user", "High card draw"),
+            ("mathduel @user", "Math duel — earn clan gold"), ("numduel @user", "Number duel — earn clan gold"),
             ("clanwar <name>", "Declare clan war"), ("warattack <id>", "Attack in war"),
         ]},
-        {"name": "Mini-Games","emoji": "🎮", "commands": [
-            ("trivia", "Answer a trivia question"), ("numguess", "Guess 1-100"),
+        {"name": "Mini-Games", "commands": [
+            ("trivia", "Multiple choice trivia"), ("numguess", "Guess 1-100"),
             ("diceroll <bet>", "Roll the dice"), ("scramble", "Unscramble a word"),
-            ("coinflip <bet>", "Heads or Tails flip"),
         ]},
-        {"name": "Shop",     "emoji": "🛒", "commands": [
+        {"name": "Shop", "commands": [
             ("shop", "View shop"), ("buy <item>", "Purchase an item"),
-            ("buy mult", "Buy 2.5× personal multiplier"),
+            ("buy mult", "Buy 2.5x personal multiplier"),
         ]},
-        {"name": "Stats",    "emoji": "📊", "commands": [
-            ("stats", "Your VC activity"), ("garalb", "Overall activity LB"),
-            ("clanlb", "Clan leaderboard"),
+        {"name": "Stats", "commands": [
+            ("stats", "Your VC activity"), ("garalb", "Activity leaderboard (msgs + VC)"),
+            ("clanlb", "Clan leaderboard by activity"),
         ]},
-        {"name": "Admin",    "emoji": "⚙️", "admin_only": True, "commands": [
+        {"name": "Admin", "admin_only": True, "commands": [
             ("givemoney @user <amt>", "Give coins"), ("takemoney @user <amt>", "Take coins"),
             ("setprefix <p>", "Change prefix"), ("setcurrency <name> <abbr>", "Change currency"),
             ("setroleschannel #ch", "Post earn roles UI"), ("updaterolesui", "Refresh roles UI"),
@@ -1290,91 +1304,35 @@ class HelpView(View):
             ("setrandomvc #vc", "Enable random VC redirect"), ("blacklistvc #vc", "Blacklist VC"),
             ("unblacklistvc #vc", "Unblacklist VC"), ("spin", "Nitro spin"),
             ("lockcycle <open> <close> [#ch]", "Lock/unlock schedule"),
-            ("settiername <1-5> <name>", "Set tier name"),
-            ("settierrole <1-5> @role", "Set tier role"),
-            ("settierhours <1-5> <hours>", "Set tier hours"),
-            ("settiercoins <1-5> <coins>", "Set tier daily coins"),
-            ("setclanmult <1-3> <mult>", "Set clan multiplier"),
-            ("setrichrole <1-5> @role", "Map rich role"),
-            ("addshoprole @role <price>", "Add role to shop"),
-            ("removeshoprole @role", "Remove shop role"),
-            ("giveclan <name> <amt>", "Give clan gold"),
-            ("giveclangold <amt>", "Donate to clan"),
-            ("setgiveaway #ch <prize>", "Weekly auto-giveaway"),
-            ("giveaway <duration> <prize>", "Start giveaway"),
-            ("setcrashmult <max>", "Set crash ceiling"),
-            ("createclan <name> @role", "Create clan"),
+            ("settiername <1-5> <name>", "Set tier name"), ("settierrole <1-5> @role", "Set tier role"),
+            ("settierhours <1-5> <hours>", "Set tier hours"), ("settiercoins <1-5> <coins>", "Set tier daily coins"),
+            ("setclanmult <1-3> <mult>", "Set clan multiplier"), ("setrichrole <1-5> @role", "Map rich role"),
+            ("addshoprole @role <price>", "Add role to shop"), ("removeshoprole @role", "Remove shop role"),
+            ("giveclan <name> <amt>", "Give clan gold"), ("giveclangold <amt>", "Donate to clan"),
+            ("setgiveaway #ch <prize>", "Weekly auto-giveaway"), ("giveaway <duration> <prize>", "Start giveaway"),
+            ("setcrashmult <max>", "Set crash ceiling"), ("createclan <name> @role", "Create clan"),
         ]},
     ]
-
-    # page = -1  → overview/menu
-    # page = 0..N-1 → category index
 
     def __init__(self, ctx):
         super().__init__(timeout=120)
         self.ctx = ctx
-        self.page = -1
-        visible = [c for c in self.CATEGORIES if not c.get("admin_only") or is_admin(ctx)]
-        self.visible = visible
+        self.page = 0
+        self.visible = [c for c in self.CATEGORIES if not c.get("admin_only") or is_admin(ctx)]
         self._build()
 
     def _auth(self, interaction) -> bool:
         return interaction.user.id == self.ctx.author.id
 
-    # ── button builders ──────────────────────────────────────────────────────
-
     def _build(self):
         self.clear_items()
-        if self.page == -1:
-            self._build_menu()
-        else:
-            self._build_browse()
-
-    def _build_menu(self):
-        for i, cat in enumerate(self.visible):
-            btn = Button(
-                label=f"{cat['emoji']} {cat['name']}",
-                style=discord.ButtonStyle.primary,
-                row=i // 4,
-            )
-            btn.callback = self._make_jump_cb(i)
-            self.add_item(btn)
-
-    def _build_browse(self):
         n = len(self.visible)
-        prev_btn = Button(
-            label="◀ Prev",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.page == 0),
-            row=0,
-        )
+        prev_btn = Button(label="Prev", style=discord.ButtonStyle.secondary, disabled=(self.page == 0), row=0)
         prev_btn.callback = self._prev
         self.add_item(prev_btn)
-
-        menu_btn = Button(label="☰ Menu", style=discord.ButtonStyle.primary, row=0)
-        menu_btn.callback = self._to_menu
-        self.add_item(menu_btn)
-
-        next_btn = Button(
-            label="Next ▶",
-            style=discord.ButtonStyle.secondary,
-            disabled=(self.page == n - 1),
-            row=0,
-        )
+        next_btn = Button(label="Next", style=discord.ButtonStyle.secondary, disabled=(self.page == n - 1), row=0)
         next_btn.callback = self._next
         self.add_item(next_btn)
-
-    # ── callbacks ────────────────────────────────────────────────────────────
-
-    def _make_jump_cb(self, idx):
-        async def cb(interaction):
-            if not self._auth(interaction):
-                await interaction.response.send_message("Not your help menu!", ephemeral=True)
-                return
-            self.page = idx
-            self._build()
-            await interaction.response.edit_message(embed=self._cat_embed(), view=self)
-        return cb
 
     async def _prev(self, interaction):
         if not self._auth(interaction):
@@ -1392,26 +1350,6 @@ class HelpView(View):
         self._build()
         await interaction.response.edit_message(embed=self._cat_embed(), view=self)
 
-    async def _to_menu(self, interaction):
-        if not self._auth(interaction):
-            await interaction.response.send_message("Not your help menu!", ephemeral=True)
-            return
-        self.page = -1
-        self._build()
-        await interaction.response.edit_message(embed=self.main_embed(), view=self)
-
-    # ── embeds ───────────────────────────────────────────────────────────────
-
-    def main_embed(self):
-        guild_id = self.ctx.guild.id if self.ctx.guild else None
-        cats = "\n".join(f"{c['emoji']} **{c['name']}**" for c in self.visible)
-        return gara_embed(
-            title="📖 GARA Help",
-            description=f"Select a category to browse, or use **◀ Prev / Next ▶** inside any category.\n\n{cats}",
-            color=GaraConfig.EMBED_COLOR_ACCENT,
-            guild_id=guild_id,
-        )
-
     def _cat_embed(self):
         cat = self.visible[self.page]
         guild_id = self.ctx.guild.id if self.ctx.guild else None
@@ -1419,7 +1357,7 @@ class HelpView(View):
         cmds = "\n".join(f"`{prefix}{cmd}` — {desc}" for cmd, desc in cat["commands"])
         n = len(self.visible)
         e = gara_embed(
-            title=f"{cat['emoji']} {cat['name']}",
+            title=cat["name"],
             description=cmds or "No commands.",
             color=GaraConfig.EMBED_COLOR_ACCENT,
             guild_id=guild_id,
@@ -1701,7 +1639,7 @@ async def live_leaderboard_update():
         if not settings:
             continue
 
-        # Activity / GARA leaderboard channel (top 10 users)
+        # Activity / GARA leaderboard channel — ranked by weekly msgs + VC
         act_ch_id = settings.get("activity_channel", 0)
         act_msg_id = settings.get("activity_msg_id", 0)
         if act_ch_id and act_msg_id:
@@ -1709,34 +1647,31 @@ async def live_leaderboard_update():
             if ch:
                 try:
                     msg = await ch.fetch_message(act_msg_id)
-                    rows = await db.get_leaderboard(gid, 10)
-                    medals = ["01","02","03","04","05","06","07","08","09","10"]
-                    abbrev = get_currency_abbrev(gid)
+                    rows = await db.get_activity_leaderboard(gid, 10)
                     lines = []
-                    for i, (uid, total) in enumerate(rows):
+                    for i, (uid, score) in enumerate(rows):
                         member = guild.get_member(uid)
                         name = member.display_name if member else f"User {uid}"
                         udata = await db.get_user(uid, gid)
                         wm = udata.get("weekly_messages", 0)
                         wv = udata.get("weekly_vc_minutes", 0)
                         lines.append(
-                            f"`{medals[i]}` **{name}**\n"
-                            f"       {total:,} {abbrev}  •  {wm} msgs  •  {wv} VC min"
+                            f"`{i+1:02d}` **{name}**\n"
+                            f"       {wm} msgs  •  {wv} VC min  •  Score: {score}"
                         )
-                    desc = "\n".join(lines) or "No data yet."
                     now_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     embed = gara_embed(
-                        title="GARA Leaderboard  —  Top 10",
-                        description=desc,
+                        title="GARA Leaderboard",
+                        description="\n".join(lines) or "No data yet.",
                         color=GaraConfig.EMBED_COLOR_ACCENT,
                         guild_id=gid,
-                        footer=f"Updates every 30s  •  Last: {now_ts}",
+                        footer=f"Ranked by msgs + VC  •  {now_ts}",
                     )
                     await msg.edit(embed=embed)
                 except Exception:
                     pass
 
-        # Clan leaderboard channel (top 5 clans)
+        # Clan leaderboard channel — role-based activity scoring
         clan_ch_id = settings.get("clan_channel", 0)
         clan_msg_id = settings.get("clan_msg_id", 0)
         if clan_ch_id and clan_msg_id:
@@ -1745,26 +1680,24 @@ async def live_leaderboard_update():
                 try:
                     msg = await ch.fetch_message(clan_msg_id)
                     clans = await db.get_clan_leaderboard(gid, 5)
+                    scored = await _clan_role_scores(guild, clans)
                     mults = get_clan_mults(gid)
-                    medals = ["01","02","03","04","05"]
                     lines = []
-                    for i, clan in enumerate(clans):
-                        mult_tag = f"  ×{mults[i]} bonus" if i < len(mults) else ""
+                    for i, (clan, score, msgs, vc) in enumerate(scored):
+                        mult_tag = f"  x{mults[i]}" if i < len(mults) else ""
                         role = guild.get_role(clan.get("role_id") or 0)
                         name = role.mention if role else f"**{clan['name']}**"
-                        wm = clan.get("weekly_messages", 0)
                         lines.append(
-                            f"`{medals[i]}` {name}\n"
-                            f"       {clan['gold']:,} gold  •  {wm} msgs this week{mult_tag}"
+                            f"`{i+1:02d}` {name}\n"
+                            f"       {msgs} msgs  •  {vc} VC min  •  Score: {score}{mult_tag}"
                         )
-                    desc = "\n".join(lines) or "No clans yet."
                     now_ts = datetime.datetime.now().strftime("%H:%M:%S")
                     embed = gara_embed(
-                        title="Clan Leaderboard  —  Top 5",
-                        description=desc,
+                        title="Clan Leaderboard",
+                        description="\n".join(lines) or "No clans yet.",
                         color=GaraConfig.EMBED_COLOR_ACCENT,
                         guild_id=gid,
-                        footer=f"Updates every 30s  •  Last: {now_ts}",
+                        footer=f"Ranked by member VC + chat  •  {now_ts}",
                     )
                     await msg.edit(embed=embed)
                 except Exception:
@@ -1835,13 +1768,13 @@ async def giveaway_checker():
                         winner = random.choice(weighted)
                         await ch.send(
                             embed=gara_embed(
-                                title="🎉 Giveaway Ended!",
+                                title="Giveaway Ended!",
                                 description=f"**Prize:** {gw['prize']}\n**Winner:** {winner.mention} 🎊",
                                 color=GaraConfig.EMBED_COLOR_SUCCESS,
                             )
                         )
                     else:
-                        await ch.send(embed=gara_embed(title="🎉 Giveaway Ended",
+                        await ch.send(embed=gara_embed(title="Giveaway Ended",
                                                         description="No valid entries!",
                                                         color=GaraConfig.EMBED_COLOR_WARN))
                 except Exception:
@@ -1889,7 +1822,7 @@ async def weekly_reset_task():
                 ch = guild.get_channel(act_ch_id)
                 if ch:
                     rows = await db.get_leaderboard(gid, 10)
-                    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+                    medals = ["`01`","`02`","`03`","`04`","`05`","`06`","`07`","`08`","`09`","`10`"]
                     desc = "\n".join(
                         f"{medals[i]} <@{uid}> — {total:,}" for i, (uid, total) in enumerate(rows)
                     )
@@ -2011,22 +1944,147 @@ async def give_cmd(ctx, member: discord.Member, amount: int):
 @commands.cooldown(1, 1, commands.BucketType.user)
 async def daily_cmd(ctx):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
+    now = datetime.datetime.now()
+    abbrev = get_currency_abbrev(ctx.guild.id)
+
+    # 24h cooldown
     last = user.get("last_daily")
     if last:
         dt = datetime.datetime.fromisoformat(last)
-        if datetime.datetime.now() - dt < timedelta(days=1):
-            remaining = timedelta(days=1) - (datetime.datetime.now() - dt)
+        if now - dt < timedelta(days=1):
+            remaining = timedelta(days=1) - (now - dt)
             h, rem = divmod(int(remaining.total_seconds()), 3600)
             m = rem // 60
-            return await ctx.reply(f"Come back in **{h}h {m}m**!")
-    reward = random.randint(GaraConfig.DAILY_REWARD_MIN, GaraConfig.DAILY_REWARD_MAX)
-    mult = await get_effective_mult(ctx.author.id, ctx.guild.id)
-    total = int(reward * mult)
-    await db.add_balance(ctx.author.id, ctx.guild.id, total)
-    await db.update_user(ctx.author.id, ctx.guild.id, last_daily=datetime.datetime.now().isoformat())
-    embed = gara_embed(title="Daily Reward",
-        description=f"Claimed **{total:,}** {get_currency_abbrev(ctx.guild.id)}! (×{mult:.2f} mult)",
-        color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id)
+            return await ctx.reply(f"Come back in **{h}h {m}m**!", delete_after=8)
+
+    # Login streak
+    last_login = user.get("last_login")
+    streak = user.get("login_streak") or 0
+    today = now.date()
+    if last_login:
+        try:
+            last_date = datetime.datetime.fromisoformat(last_login).date()
+            diff = (today - last_date).days
+            streak = (streak + 1) if diff == 1 else 1
+        except Exception:
+            streak = 1
+    else:
+        streak = 1
+
+    # Streak multiplier
+    if streak >= 30:
+        streak_mult, streak_label = 3.0, f"{streak}-day streak"
+    elif streak >= 14:
+        streak_mult, streak_label = 2.0, "Two-week streak"
+    elif streak >= 7:
+        streak_mult, streak_label = 1.5, "Week streak"
+    else:
+        streak_mult, streak_label = 1.0, None
+
+    # Base reward
+    base = random.randint(GaraConfig.DAILY_REWARD_MIN, GaraConfig.DAILY_REWARD_MAX)
+
+    # Top-3 GARA activity LB bonus
+    lb_bonus, lb_rank = 1.0, None
+    try:
+        activity_rows = await db.get_activity_leaderboard(ctx.guild.id, 3)
+        for i, (uid, _) in enumerate(activity_rows):
+            if uid == ctx.author.id:
+                lb_rank = i + 1
+                lb_bonus = [1.4, 1.25, 1.15][i]
+                break
+    except Exception:
+        pass
+
+    # Top-3 Clan LB bonus (role-based activity score)
+    clan_bonus = 1.0
+    user_clan = await db.get_user_clan(ctx.author.id, ctx.guild.id)
+    if user_clan:
+        try:
+            all_clans = await db.get_clan_leaderboard(ctx.guild.id, 20)
+            scored = []
+            for clan in all_clans:
+                role = ctx.guild.get_role(clan.get("role_id") or 0)
+                if role:
+                    uids = [m.id for m in role.members]
+                    if uids:
+                        async with aiosqlite.connect(db.db_path) as conn:
+                            placeholders = ",".join("?" * len(uids))
+                            async with conn.execute(
+                                f"SELECT COALESCE(SUM(weekly_messages+weekly_vc_minutes),0) FROM users WHERE guild_id=? AND user_id IN ({placeholders})",
+                                (ctx.guild.id, *uids),
+                            ) as c:
+                                row = await c.fetchone()
+                                score = row[0] if row else 0
+                    else:
+                        score = 0
+                else:
+                    score = clan.get("weekly_messages", 0) + clan.get("weekly_vc_minutes", 0)
+                scored.append((clan["clan_id"], score))
+            scored.sort(key=lambda x: x[1], reverse=True)
+            for i, (cid, _) in enumerate(scored[:3]):
+                if cid == user_clan["clan_id"]:
+                    clan_bonus = [1.3, 1.2, 1.1][i]
+                    break
+        except Exception:
+            pass
+
+    # Economy multiplier
+    eff_mult = await get_effective_mult(ctx.author.id, ctx.guild.id)
+
+    # Total reward
+    total = int(base * streak_mult * lb_bonus * clan_bonus * eff_mult)
+
+    # Random bonus roll
+    extra, bonus_tag = 0, None
+    roll = random.random()
+    if roll < 0.04:
+        extra = int(total * 0.60); bonus_tag = f"Jackpot pull  +{extra:,} {abbrev}"
+    elif roll < 0.15:
+        extra = int(total * 0.25); bonus_tag = f"Lucky bonus  +{extra:,} {abbrev}"
+    elif roll < 0.35:
+        extra = int(total * 0.10); bonus_tag = f"Small bonus  +{extra:,} {abbrev}"
+
+    grand = total + extra
+    await db.add_balance(ctx.author.id, ctx.guild.id, grand)
+    await db.update_user(ctx.author.id, ctx.guild.id,
+                         last_daily=now.isoformat(),
+                         last_login=now.isoformat(),
+                         login_streak=streak)
+
+    # Next milestone text
+    if streak < 7:
+        next_ms = "Day 7  (x1.5 bonus)"
+    elif streak < 14:
+        next_ms = "Day 14  (x2.0 bonus)"
+    elif streak < 30:
+        next_ms = "Day 30  (x3.0 bonus)"
+    else:
+        nxt = streak + (30 - streak % 30)
+        next_ms = f"Day {nxt}"
+
+    lines = [f"**+{grand:,}** {abbrev}", ""]
+    lines.append(f"Streak    {streak} day{'s' if streak != 1 else ''}")
+    if streak_mult > 1.0:
+        lines.append(f"Streak bonus    x{streak_mult}")
+    if lb_rank:
+        lines.append(f"Activity rank #{lb_rank}    x{lb_bonus}")
+    if clan_bonus > 1.0:
+        lines.append(f"Clan rank bonus    x{clan_bonus}")
+    if eff_mult > 1.0:
+        lines.append(f"Multiplier    x{eff_mult:.2f}")
+    if bonus_tag:
+        lines += ["", bonus_tag]
+    if streak_label:
+        lines += ["", streak_label]
+
+    embed = gara_embed(
+        title="Daily",
+        description="\n".join(lines),
+        color=GaraConfig.EMBED_COLOR_SUCCESS,
+        guild_id=ctx.guild.id,
+        footer=f"Next milestone: {next_ms}",
+    )
     await ctx.reply(embed=embed)
 
 
@@ -2039,17 +2097,28 @@ async def work_cmd(ctx):
         dt = datetime.datetime.fromisoformat(last)
         if datetime.datetime.now() - dt < timedelta(hours=GaraConfig.WORK_COOLDOWN_HOURS):
             remaining = timedelta(hours=GaraConfig.WORK_COOLDOWN_HOURS) - (datetime.datetime.now() - dt)
-            return await ctx.reply(f"Work again in **{int(remaining.total_seconds()//60)} min**!")
-    jobs = ["delivered packages","mined crypto","traded stocks","streamed games",
-            "fixed bugs","designed logos","wrote code","hacked the mainframe","flipped burgers","walked dogs"]
+            m = int(remaining.total_seconds() // 60)
+            return await ctx.reply(f"Work again in **{m} min**!", delete_after=8)
+    jobs = [
+        "delivered packages", "mined crypto", "traded stocks", "streamed games",
+        "fixed critical bugs", "designed a logo", "wrote backend code", "hacked the mainframe",
+        "walked dogs", "managed a server", "ran a Discord bot", "sold digital art",
+        "played poker professionally", "drove for a rideshare app", "freelanced on Fiverr",
+        "ran ads for a brand deal", "tutored math online", "flipped GPUs",
+    ]
     base = random.randint(GaraConfig.WORK_REWARD_MIN, GaraConfig.WORK_REWARD_MAX)
     mult = await get_effective_mult(ctx.author.id, ctx.guild.id)
     earned = int(base * mult)
     await db.add_balance(ctx.author.id, ctx.guild.id, earned)
     await db.update_user(ctx.author.id, ctx.guild.id, last_work=datetime.datetime.now().isoformat())
-    await ctx.reply(embed=gara_embed(title="Work Complete",
-        description=f"You {random.choice(jobs)} and earned **{earned:,}** {get_currency_abbrev(ctx.guild.id)}! (×{mult:.2f})",
-        color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id))
+    abbrev = get_currency_abbrev(ctx.guild.id)
+    await ctx.reply(embed=gara_embed(
+        title="Work",
+        description=f"You {random.choice(jobs)} and earned **{earned:,}** {abbrev}",
+        color=GaraConfig.EMBED_COLOR_SUCCESS,
+        guild_id=ctx.guild.id,
+        footer=f"x{mult:.2f} multiplier applied  •  Next work in {GaraConfig.WORK_COOLDOWN_HOURS}h",
+    ))
 
 
 @bot.command(name="rob")
@@ -2071,13 +2140,13 @@ async def rob_cmd(ctx, member: discord.Member):
     if success:
         stolen = random.randint(int(target["balance"] * 0.1), int(target["balance"] * 0.3))
         await db.rob_balance(ctx.author.id, member.id, ctx.guild.id, stolen, 0, True)
-        embed = gara_embed(title="🔫 Robbery Successful!",
+        embed = gara_embed(title="Robbery Successful!",
             description=f"Stole **{stolen:,}** {get_currency_abbrev(ctx.guild.id)} from {member.mention}!",
             color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id)
     else:
         fine = random.randint(50, max(50, min(500, user["balance"])))
         await db.rob_balance(ctx.author.id, member.id, ctx.guild.id, 0, fine, False)
-        embed = gara_embed(title="🚔 Caught!",
+        embed = gara_embed(title="Caught!",
             description=f"You were caught and fined **{fine:,}** {get_currency_abbrev(ctx.guild.id)}!",
             color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id)
     await ctx.reply(embed=embed)
@@ -2095,19 +2164,21 @@ async def leaderboard_cmd(ctx):
 @bot.command(name="garalb")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def garalb_cmd(ctx):
-    rows = await db.get_leaderboard(ctx.guild.id, 10)
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    desc = ""
-    for i, (uid, total) in enumerate(rows):
+    rows = await db.get_activity_leaderboard(ctx.guild.id, 10)
+    lines = []
+    for i, (uid, score) in enumerate(rows):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else f"<@{uid}>"
-        user_data = await db.get_user(uid, ctx.guild.id)
-        wm = user_data.get("weekly_messages", 0)
-        wv = user_data.get("weekly_vc_minutes", 0)
-        desc += f"{medals[i]} **{name}** — {total:,} GC | {wm} msgs | {wv} VC mins\n"
-    embed = gara_embed(title="📊 Overall Activity Leaderboard",
-                       description=desc or "No data.", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
-                       footer="Active voice only — unmuted and undeafened")
+        udata = await db.get_user(uid, ctx.guild.id)
+        wm = udata.get("weekly_messages", 0)
+        wv = udata.get("weekly_vc_minutes", 0)
+        lines.append(f"`{i+1:02d}` **{name}**\n      {wm} msgs  •  {wv} VC min")
+    embed = gara_embed(
+        title="GARA Leaderboard",
+        description="\n".join(lines) or "No activity recorded yet.",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+        footer="Ranked by weekly messages + VC minutes",
+    )
     await ctx.reply(embed=embed)
 
 
@@ -2115,16 +2186,20 @@ async def garalb_cmd(ctx):
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def clanlb_cmd(ctx):
     clans = await db.get_clan_leaderboard(ctx.guild.id, 10)
+    scored = await _clan_role_scores(ctx.guild, clans)
     mults = get_clan_mults(ctx.guild.id)
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    desc = ""
-    for i, clan in enumerate(clans):
-        mult_tag = f"**×{mults[i]}**" if i < len(mults) else ""
+    lines = []
+    for i, (clan, score, msgs, vc) in enumerate(scored):
         role = ctx.guild.get_role(clan.get("role_id") or 0)
-        role_str = role.mention if role else f"**{clan['name']}**"
-        desc += f"{medals[i]} {role_str} — {clan['gold']:,} gold | {clan.get('weekly_messages',0)} msgs {mult_tag}\n"
-    embed = gara_embed(title="🏰 Clan Leaderboard",
-                       description=desc or "No clans.", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+        name = role.mention if role else f"**{clan['name']}**"
+        mult_tag = f"  x{mults[i]}" if i < len(mults) else ""
+        lines.append(f"`{i+1:02d}` {name}\n      {msgs} msgs  •  {vc} VC min  •  Score: {score}{mult_tag}")
+    embed = gara_embed(
+        title="Clan Leaderboard",
+        description="\n".join(lines) or "No clans.",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+        footer="Ranked by member weekly messages + VC minutes via clan role",
+    )
     await ctx.reply(embed=embed)
 
 
@@ -2142,21 +2217,21 @@ async def profile_cmd(ctx, member: discord.Member = None):
     lb = await db.get_leaderboard(ctx.guild.id, 100)
     lb_rank = next((i+1 for i, (uid, _) in enumerate(lb) if uid == target.id), "N/A")
 
-    embed = gara_embed(title=f"🪪 {target.display_name}'s Profile",
+    embed = gara_embed(title=f"{target.display_name}",
                        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
                        thumbnail=target.display_avatar.url)
-    embed.add_field(name="💰 Wallet",       value=f"{user['balance']:,} {abbrev}", inline=True)
-    embed.add_field(name="🏦 Vault",        value=f"{user['vault']:,} {abbrev}", inline=True)
-    embed.add_field(name="📊 Total",        value=f"{total_wealth:,} {abbrev}", inline=True)
-    embed.add_field(name="⭐ Aura",         value=str(user.get("aura", 0)), inline=True)
-    embed.add_field(name="🎙️ VC Hours",    value=f"{user.get('vc_hours', 0):.1f}h", inline=True)
-    embed.add_field(name="💬 Messages",     value=str(user.get("total_messages", 0)), inline=True)
-    embed.add_field(name="🏅 Tier",         value=tier["name"] if tier else "None", inline=True)
-    embed.add_field(name="🏆 LB Rank",      value=f"#{lb_rank}", inline=True)
-    embed.add_field(name="✨ Multiplier",   value=f"×{mult:.2f}", inline=True)
-    embed.add_field(name="🏰 Clan",         value=clan["name"] if clan else "None", inline=True)
-    embed.add_field(name="📈 Weekly Msgs",  value=str(user.get("weekly_messages", 0)), inline=True)
-    embed.add_field(name="🎙️ Weekly VC",   value=f"{user.get('weekly_vc_minutes', 0)} min", inline=True)
+    embed.add_field(name="Wallet",       value=f"{user['balance']:,} {abbrev}", inline=True)
+    embed.add_field(name="Vault",        value=f"{user['vault']:,} {abbrev}", inline=True)
+    embed.add_field(name="Total",        value=f"{total_wealth:,} {abbrev}", inline=True)
+    embed.add_field(name="Aura",         value=str(user.get("aura", 0)), inline=True)
+    embed.add_field(name="VC Hours",     value=f"{user.get('vc_hours', 0):.1f}h", inline=True)
+    embed.add_field(name="Messages",     value=str(user.get("total_messages", 0)), inline=True)
+    embed.add_field(name="Tier",         value=tier["name"] if tier else "None", inline=True)
+    embed.add_field(name="LB Rank",      value=f"#{lb_rank}", inline=True)
+    embed.add_field(name="Multiplier",   value=f"x{mult:.2f}", inline=True)
+    embed.add_field(name="Clan",         value=clan["name"] if clan else "None", inline=True)
+    embed.add_field(name="Weekly Msgs",  value=str(user.get("weekly_messages", 0)), inline=True)
+    embed.add_field(name="Weekly VC",    value=f"{user.get('weekly_vc_minutes', 0)} min", inline=True)
     await ctx.reply(embed=embed)
 
 
@@ -2260,7 +2335,7 @@ async def blackjack_cmd(ctx, bet: int):
 
 @bot.command(name="crash")
 @commands.cooldown(1, 5, commands.BucketType.user)
-async def crash_cmd(ctx, bet: int):
+async def crash_cmd(ctx, bet: int, autocashout: float = 0.0):
     user = await db.get_user(ctx.author.id, ctx.guild.id)
     if bet <= 0 or bet > user["balance"]:
         return await ctx.reply("Invalid bet!", delete_after=5)
@@ -2271,21 +2346,22 @@ async def crash_cmd(ctx, bet: int):
     await db.sub_balance(ctx.author.id, ctx.guild.id, bet)
     crash_at = round(random.uniform(1.0, max_mult) * random.uniform(0.5, 1.0), 2)
     crash_at = max(1.01, crash_at)
+    auto = round(max(0.0, autocashout), 2)
     started = time.monotonic()
-    state = {"mult": 1.0, "crashed": False, "cashed": False, "crash_at": crash_at, "started_at": started}
+    state = {"mult": 1.0, "crashed": False, "cashed": False, "crash_at": crash_at}
     bot.active_crashes[ctx.author.id] = state
     abbrev = get_currency_abbrev(ctx.guild.id)
 
     def make_crash_embed(mult, elapsed):
-        bar_len = min(int(mult * 4), 20)
-        bar = "█" * bar_len + "░" * (20 - bar_len)
+        potential = int(bet * mult)
         desc = (
             f"```\n"
-            f"  {bar}\n"
-            f"  {mult:.2f}×          {elapsed}s\n"
+            f"     {mult:.2f}×\n"
             f"```\n"
-            f"**Bet:** {bet:,} {abbrev}  •  **Potential:** {int(bet * mult):,} {abbrev}"
+            f"{bet:,} {abbrev}  →  **{potential:,} {abbrev}**  ·  {elapsed}s"
         )
+        if auto > 1.0:
+            desc += f"\nAuto-cashout at  **{auto:.2f}×**"
         return gara_embed(title="Crash", description=desc,
                           color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
 
@@ -2300,12 +2376,33 @@ async def crash_cmd(ctx, bet: int):
             elapsed = int(time.monotonic() - started)
             state["mult"] = round(state["mult"] + tick_val, 2)
             tick_val = min(tick_val * 1.04, 0.5)
-            if state["mult"] >= state["crash_at"]:
+            m = state["mult"]
+            # Auto-cashout
+            if auto > 1.0 and m >= auto and not state["cashed"] and not state["crashed"]:
+                state["cashed"] = True
+                bot.active_crashes.pop(ctx.author.id, None)
+                winnings = int(bet * auto)
+                await db.add_balance(ctx.author.id, ctx.guild.id, winnings)
+                profit = winnings - bet
+                win_embed = gara_embed(
+                    title=f"Auto Cashout  ·  {auto:.2f}×",
+                    description=f"+**{profit:,}** {abbrev}  (cashed {bet:,} → {winnings:,})",
+                    color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id,
+                )
+                for item in view.children:
+                    item.disabled = True
+                try:
+                    await msg.edit(embed=win_embed, view=view)
+                except Exception:
+                    pass
+                view.stop()
+                return
+            if m >= state["crash_at"]:
                 state["crashed"] = True
                 bot.active_crashes.pop(ctx.author.id, None)
                 crash_embed = gara_embed(
-                    title=f"Crashed  —  {state['mult']:.2f}×",
-                    description=f"Lost **{bet:,}** {abbrev} after {elapsed}s",
+                    title=f"Crashed  ·  {m:.2f}×",
+                    description=f"Lost **{bet:,}** {abbrev}  ·  {elapsed}s",
                     color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id,
                 )
                 for item in view.children:
@@ -2318,7 +2415,7 @@ async def crash_cmd(ctx, bet: int):
                 return
             if not state["cashed"]:
                 try:
-                    await msg.edit(embed=make_crash_embed(state["mult"], elapsed), view=view)
+                    await msg.edit(embed=make_crash_embed(m, elapsed), view=view)
                 except Exception:
                     state["crashed"] = True
                     return
@@ -2351,7 +2448,7 @@ async def coinflip_cmd(ctx, bet: int):
 async def fame_cmd(ctx, member: discord.Member = None):
     target = member or ctx.author
     user = await db.get_user(target.id, ctx.guild.id)
-    embed = gara_embed(title=f"⭐ {target.display_name}'s Fame",
+    embed = gara_embed(title=f"{target.display_name}'s Fame",
                        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
                        thumbnail=target.display_avatar.url)
     embed.add_field(name="Aura",   value=f"**{user['aura']}**", inline=True)
@@ -2375,7 +2472,7 @@ async def boost_cmd(ctx, member: discord.Member):
             return await ctx.reply(f"Wait **{int(remaining.total_seconds()//60)} min**!")
     target = await db.get_user(member.id, ctx.guild.id)
     await db.boost_user(ctx.author.id, member.id, ctx.guild.id)
-    await ctx.reply(embed=gara_embed(title="⬆️ Boosted!",
+    await ctx.reply(embed=gara_embed(title="Boosted!",
         description=f"You boosted {member.mention}'s aura to **{target['aura']+1}**!",
         color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id))
 
@@ -2394,7 +2491,7 @@ async def neg_cmd(ctx, member: discord.Member):
             return await ctx.reply(f"Wait **{int(remaining.total_seconds()//60)} min**!")
     target = await db.get_user(member.id, ctx.guild.id)
     await db.neg_user(ctx.author.id, member.id, ctx.guild.id)
-    await ctx.reply(embed=gara_embed(title="⬇️ Negged!",
+    await ctx.reply(embed=gara_embed(title="Negged!",
         description=f"Negged {member.mention}! Their aura: **{max(0,target['aura']-1)}**.",
         color=GaraConfig.EMBED_COLOR_FAIL, guild_id=ctx.guild.id))
 
@@ -2403,13 +2500,13 @@ async def neg_cmd(ctx, member: discord.Member):
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def famous_cmd(ctx):
     rows = await db.get_fame_leaderboard(ctx.guild.id, 10)
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    medals = ["`01`","`02`","`03`","`04`","`05`","`06`","`07`","`08`","`09`","`10`"]
     desc = ""
     for i, (uid, aura, impact) in enumerate(rows):
         member = ctx.guild.get_member(uid)
         name = member.display_name if member else f"<@{uid}>"
         desc += f"{medals[i]} **{name}** — Aura: {aura} | Impact: {impact}\n"
-    await ctx.reply(embed=gara_embed(title="⭐ Most Famous",
+    await ctx.reply(embed=gara_embed(title="Most Famous",
         description=desc or "No data.", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id))
 
 
@@ -2422,11 +2519,11 @@ async def famous_cmd(ctx):
 async def shop_cmd(ctx):
     prefix = get_prefix_for_guild(ctx.guild.id)
     abbrev = get_currency_abbrev(ctx.guild.id)
-    embed = gara_embed(title="🛒 Shop", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
-    embed.add_field(name="🔇 Mute",
+    embed = gara_embed(title="Shop", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+    embed.add_field(name="Mute",
                     value=f"Timeout someone 5 min.\n**{GaraConfig.MUTE_BASE_PRICE:,}** {abbrev} or 10% wealth\n`{prefix}buy mute @user`",
                     inline=False)
-    embed.add_field(name="✨ 2.5× Multiplier",
+    embed.add_field(name="2.5x Multiplier",
                     value=f"Personal stacking multiplier.\n**{GaraConfig.MULT_SHOP_PRICE:,}** {abbrev} or 20% total wealth\n`{prefix}buy mult`",
                     inline=False)
     # Custom shop roles
@@ -2439,7 +2536,7 @@ async def shop_cmd(ctx):
     for item in shop_roles:
         role = ctx.guild.get_role(item["role_id"])
         if role:
-            embed.add_field(name=f"🎭 {role.name}",
+            embed.add_field(name=f"{role.name}",
                             value=f"**{item['price']:,}** {abbrev}\n`{prefix}buy role {role.id}`",
                             inline=False)
     await ctx.reply(embed=embed)
@@ -2460,7 +2557,7 @@ async def buy_cmd(ctx, item: str, target: discord.Member = None):
             return await ctx.reply(f"Need **{price:,}** {abbrev}!")
         try:
             await target.timeout(timedelta(minutes=5), reason=f"Shop mute by {ctx.author.display_name}")
-            await ctx.reply(embed=gara_embed(title="🔇 Muted!",
+            await ctx.reply(embed=gara_embed(title="Muted!",
                 description=f"{target.mention} muted for 5 min! Cost: **{price:,}** {abbrev}",
                 color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id))
         except discord.Forbidden:
@@ -2506,50 +2603,74 @@ async def buy_cmd(ctx, item: str, target: discord.Member = None):
 # CLAN COMMANDS
 # ══════════════════════════════════════════
 
+async def _clan_role_scores(guild, clans):
+    """Compute clan activity from members with each clan's Discord role.
+    Returns list of (clan_dict, score, msgs, vc) sorted by score desc."""
+    results = []
+    for clan in clans:
+        rid = clan.get("role_id")
+        role = guild.get_role(rid) if rid else None
+        if role and role.members:
+            uids = [m.id for m in role.members]
+            placeholders = ",".join("?" * len(uids))
+            async with aiosqlite.connect(db.db_path) as conn:
+                async with conn.execute(
+                    f"SELECT COALESCE(SUM(weekly_messages),0), COALESCE(SUM(weekly_vc_minutes),0) "
+                    f"FROM users WHERE guild_id=? AND user_id IN ({placeholders})",
+                    (guild.id, *uids),
+                ) as c:
+                    row = await c.fetchone()
+                    msgs, vc = (row[0] or 0), (row[1] or 0)
+        else:
+            msgs = clan.get("weekly_messages", 0)
+            vc = clan.get("weekly_vc_minutes", 0)
+        results.append((clan, msgs + vc, msgs, vc))
+    results.sort(key=lambda x: x[1], reverse=True)
+    return results
+
+
 @bot.command(name="clans")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def clans_cmd(ctx):
     clans = await db.get_clan_leaderboard(ctx.guild.id, 10)
+    scored = await _clan_role_scores(ctx.guild, clans)
     mults = get_clan_mults(ctx.guild.id)
-    embed = gara_embed(title="🏆 Clan Leaderboard", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
-    if not clans:
-        embed.description = "No clans yet! Admins can create them with `.createclan`"
-    else:
-        desc = ""
-        for i, clan in enumerate(clans):
-            mult_tag = f" **×{mults[i]}**" if i < len(mults) else ""
-            desc += f"**{i+1}. {clan['name']}** — {clan['gold']:,} gold{mult_tag}\n"
-        embed.description = desc
+    lines = []
+    for i, (clan, score, msgs, vc) in enumerate(scored):
+        role = ctx.guild.get_role(clan.get("role_id") or 0)
+        name = role.mention if role else f"**{clan['name']}**"
+        mult_tag = f"  x{mults[i]}" if i < len(mults) else ""
+        lines.append(f"`{i+1:02d}` {name} — Score: **{score}**{mult_tag}")
+    embed = gara_embed(
+        title="Clan Leaderboard",
+        description="\n".join(lines) if lines else "No clans yet! Admins can use `.createclan`",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+        footer="Ranked by member VC + chat activity via clan role",
+    )
     await ctx.reply(embed=embed)
 
 
 @bot.command(name="clanstats")
 @commands.cooldown(1, 5, commands.BucketType.user)
 async def clanstats_cmd(ctx):
-    today = datetime.date.today().isoformat()
-    async with aiosqlite.connect(db.db_path) as conn:
-        async with conn.execute("""
-            SELECT c.name, c.gold, c.weekly_messages, c.weekly_vc_minutes,
-                   COALESCE(da.message_count,0) as today_msgs, c.role_id
-            FROM clans c
-            LEFT JOIN daily_activity da ON c.clan_id=da.clan_id AND da.date=?
-            WHERE c.guild_id=?
-            ORDER BY c.gold DESC
-        """, (today, ctx.guild.id)) as c:
-            rows = await c.fetchall()
+    clans = await db.get_clan_leaderboard(ctx.guild.id, 20)
+    scored = await _clan_role_scores(ctx.guild, clans)
     mults = get_clan_mults(ctx.guild.id)
-    embed = gara_embed(title="🏰 Full Clan Stats", color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
-                       footer="Active voice only — unmuted and undeafened")
-    for i, (name, gold, w_msgs, w_vc, today_msgs, role_id) in enumerate(rows):
-        role = ctx.guild.get_role(role_id)
-        mention = role.mention if role else name
-        mult_str = f" ×{mults[i]}" if i < len(mults) else ""
+    embed = gara_embed(
+        title="Clan Stats",
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id,
+        footer="Activity from all members with the clan's Discord role",
+    )
+    for i, (clan, score, msgs, vc) in enumerate(scored):
+        role = ctx.guild.get_role(clan.get("role_id") or 0)
+        mention = role.mention if role else clan["name"]
+        mult_str = f" x{mults[i]}" if i < len(mults) else ""
         embed.add_field(
-            name=f"{i+1}. {name}{mult_str}",
-            value=f"{mention}\n💰 {gold:,} gold | 💬 {w_msgs} w-msgs | 🎙 {w_vc} w-VC | Today: {today_msgs} msgs",
+            name=f"{i+1}. {clan['name']}{mult_str}",
+            value=f"{mention}\n{clan['gold']:,} gold  •  {msgs} msgs  •  {vc} VC min  •  Score: {score}",
             inline=False,
         )
-    if not rows:
+    if not scored:
         embed.description = "No clans found."
     await ctx.reply(embed=embed)
 
@@ -2702,7 +2823,7 @@ async def clanwar_cmd(ctx, *, clan_name: str):
         await conn.commit()
         async with conn.execute("SELECT last_insert_rowid()") as c:
             war_id = (await c.fetchone())[0]
-    await ctx.reply(embed=gara_embed(title="⚔️ Clan War Declared!",
+    await ctx.reply(embed=gara_embed(title="Clan War Declared!",
         description=f"**{attacker_clan['name']}** vs **{defender_clan['name']}**\nWar ID: `{war_id}`\nUse `.warattack {war_id}` to battle!",
         color=GaraConfig.EMBED_COLOR_WARN, guild_id=ctx.guild.id))
 
@@ -2735,6 +2856,217 @@ async def warattack_cmd(ctx, war_id: int):
                        description=f"Attacker: **{scores[0]:,}** vs Defender: **{scores[1]:,}**",
                        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
     await ctx.reply(embed=embed)
+
+
+# ══════════════════════════════════════════
+# CLAN DUEL MINIGAMES
+# ══════════════════════════════════════════
+
+_DUEL_COOLDOWN = 300  # 5 minutes
+_DUEL_MAX = 3
+
+def _duel_check(user_id: int):
+    """Return remaining seconds on cooldown, or None if OK."""
+    now = time.monotonic()
+    usage = [t for t in bot.duel_usage.get(user_id, []) if now - t < _DUEL_COOLDOWN]
+    bot.duel_usage[user_id] = usage
+    if len(usage) >= _DUEL_MAX:
+        return _DUEL_COOLDOWN - (now - usage[0])
+    return None
+
+def _duel_record(user_id: int):
+    bot.duel_usage.setdefault(user_id, []).append(time.monotonic())
+
+def _gen_math():
+    op = random.choice(['+', '-', '*'])
+    if op == '+':
+        a, b = random.randint(10, 99), random.randint(10, 99); ans = a + b
+    elif op == '-':
+        a, b = random.randint(20, 99), random.randint(1, 20); ans = a - b
+    else:
+        a, b = random.randint(2, 12), random.randint(2, 12); ans = a * b
+    wrongs = set()
+    while len(wrongs) < 3:
+        w = ans + random.choice([-6,-4,-3,-2,-1,1,2,3,4,6])
+        if w != ans and w > 0:
+            wrongs.add(w)
+    choices = list(wrongs) + [ans]
+    random.shuffle(choices)
+    return f"{a} {op} {b}", ans, choices
+
+
+class MathDuelView(View):
+    def __init__(self, p1, p2, question, correct, choices, guild_id):
+        super().__init__(timeout=20)
+        self.p1, self.p2 = p1, p2
+        self.correct = str(correct)
+        self.guild_id = guild_id
+        self.attempts = set()
+        self.winner = None
+        self.message = None
+        for c in choices:
+            btn = Button(label=str(c), style=discord.ButtonStyle.secondary)
+            btn.callback = self._make_cb(str(c))
+            self.add_item(btn)
+
+    def _make_cb(self, choice):
+        async def cb(interaction: discord.Interaction):
+            uid = interaction.user.id
+            if uid not in (self.p1.id, self.p2.id):
+                return await interaction.response.send_message("Not your duel!", ephemeral=True)
+            if uid in self.attempts:
+                return await interaction.response.send_message("Already answered!", ephemeral=True)
+            if self.winner:
+                return await interaction.response.send_message("Duel over!", ephemeral=True)
+            self.attempts.add(uid)
+            if choice == self.correct:
+                self.winner = interaction.user
+                self.stop()
+                for b in self.children:
+                    b.disabled = True
+                    if b.label == self.correct:
+                        b.style = discord.ButtonStyle.success
+                clan = await db.get_user_clan(uid, self.guild_id)
+                if clan:
+                    async with aiosqlite.connect(db.db_path) as conn:
+                        await conn.execute("UPDATE clans SET gold=gold+300 WHERE clan_id=?", (clan["clan_id"],))
+                        await conn.commit()
+                embed = gara_embed(title="Math Duel",
+                    description=f"**{interaction.user.display_name}** answered first  —  +300 clan gold",
+                    color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.guild_id)
+                await interaction.response.edit_message(embed=embed, view=self)
+            else:
+                await interaction.response.send_message("Wrong answer.", ephemeral=True)
+                if len(self.attempts) >= 2 and not self.winner:
+                    self.stop()
+                    for b in self.children:
+                        b.disabled = True
+                        if b.label == self.correct:
+                            b.style = discord.ButtonStyle.success
+                    try:
+                        await interaction.message.edit(embed=gara_embed(title="Math Duel",
+                            description=f"Both missed. Correct answer: **{self.correct}**",
+                            color=GaraConfig.EMBED_COLOR_WARN, guild_id=self.guild_id), view=self)
+                    except Exception:
+                        pass
+        return cb
+
+    async def on_timeout(self):
+        for b in self.children:
+            b.disabled = True
+            if b.label == self.correct:
+                b.style = discord.ButtonStyle.success
+        if self.message:
+            try:
+                await self.message.edit(embed=gara_embed(title="Math Duel",
+                    description=f"Time's up. Correct: **{self.correct}**",
+                    color=GaraConfig.EMBED_COLOR_WARN), view=self)
+            except Exception:
+                pass
+
+
+class NumberDuelView(View):
+    def __init__(self, p1, p2, secret, guild_id):
+        super().__init__(timeout=25)
+        self.p1, self.p2 = p1, p2
+        self.secret = secret
+        self.guild_id = guild_id
+        self.picks = {}
+        self.message = None
+        for i in range(1, 10):
+            btn = Button(label=str(i), style=discord.ButtonStyle.secondary, row=i // 5)
+            btn.callback = self._make_cb(i)
+            self.add_item(btn)
+
+    def _make_cb(self, num):
+        async def cb(interaction: discord.Interaction):
+            uid = interaction.user.id
+            if uid not in (self.p1.id, self.p2.id):
+                return await interaction.response.send_message("Not your duel!", ephemeral=True)
+            if uid in self.picks:
+                return await interaction.response.send_message("Already picked!", ephemeral=True)
+            self.picks[uid] = num
+            await interaction.response.send_message(f"Locked in **{num}**. Waiting for opponent...", ephemeral=True)
+            if len(self.picks) == 2:
+                self.stop()
+                await self._reveal(interaction)
+        return cb
+
+    async def _reveal(self, interaction):
+        cp = self.picks.get(self.p1.id)
+        tp = self.picks.get(self.p2.id)
+        cd = abs(cp - self.secret) if cp is not None else 99
+        td = abs(tp - self.secret) if tp is not None else 99
+        winner = self.p1 if cd <= td else self.p2
+        for b in self.children:
+            b.disabled = True
+        clan = await db.get_user_clan(winner.id, self.guild_id)
+        gold = 0
+        if clan:
+            async with aiosqlite.connect(db.db_path) as conn:
+                await conn.execute("UPDATE clans SET gold=gold+200 WHERE clan_id=?", (clan["clan_id"],))
+                await conn.commit()
+            gold = 200
+        desc = (f"Secret: **{self.secret}**\n\n"
+                f"{self.p1.display_name}  →  {cp if cp else '?'}  (off by {cd})\n"
+                f"{self.p2.display_name}  →  {tp if tp else '?'}  (off by {td})\n\n"
+                f"**{winner.display_name}** wins  —  +{gold} clan gold")
+        try:
+            await interaction.message.edit(embed=gara_embed(title="Number Duel", description=desc,
+                color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=self.guild_id), view=self)
+        except Exception:
+            pass
+
+    async def on_timeout(self):
+        for b in self.children:
+            b.disabled = True
+        missing = [p.display_name for p in (self.p1, self.p2) if p.id not in self.picks]
+        if self.message:
+            try:
+                await self.message.edit(embed=gara_embed(title="Number Duel",
+                    description=f"Secret was **{self.secret}**. {', '.join(missing) or 'Everyone'} timed out.",
+                    color=GaraConfig.EMBED_COLOR_WARN), view=self)
+            except Exception:
+                pass
+
+
+@bot.command(name="mathduel")
+@commands.cooldown(1, 1, commands.BucketType.user)
+async def mathduel_cmd(ctx, member: discord.Member):
+    if member.bot or member.id == ctx.author.id:
+        return await ctx.reply("Invalid target!", delete_after=5)
+    remaining = _duel_check(ctx.author.id)
+    if remaining is not None:
+        m, s = int(remaining // 60), int(remaining % 60)
+        return await ctx.reply(f"3 duels completed. Next duel unlocks in **{m}m {s}s**.", delete_after=8)
+    _duel_record(ctx.author.id)
+    question, ans, choices = _gen_math()
+    view = MathDuelView(ctx.author, member, question, ans, choices, ctx.guild.id)
+    embed = gara_embed(title="Math Duel",
+        description=(f"{ctx.author.mention} vs {member.mention}\n\n"
+                     f"**{question} = ?**\n\nFirst correct answer wins **300** clan gold"),
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+    view.message = await ctx.reply(embed=embed, view=view)
+
+
+@bot.command(name="numduel")
+@commands.cooldown(1, 1, commands.BucketType.user)
+async def numduel_cmd(ctx, member: discord.Member):
+    if member.bot or member.id == ctx.author.id:
+        return await ctx.reply("Invalid target!", delete_after=5)
+    remaining = _duel_check(ctx.author.id)
+    if remaining is not None:
+        m, s = int(remaining // 60), int(remaining % 60)
+        return await ctx.reply(f"3 duels completed. Next duel unlocks in **{m}m {s}s**.", delete_after=8)
+    _duel_record(ctx.author.id)
+    secret = random.randint(1, 9)
+    view = NumberDuelView(ctx.author, member, secret, ctx.guild.id)
+    embed = gara_embed(title="Number Duel",
+        description=(f"{ctx.author.mention} vs {member.mention}\n\n"
+                     f"Pick a number **1 – 9**. Closest to the secret wins.\n"
+                     f"Winner earns **200** clan gold."),
+        color=GaraConfig.EMBED_COLOR_ACCENT, guild_id=ctx.guild.id)
+    view.message = await ctx.reply(embed=embed, view=view)
 
 
 # ══════════════════════════════════════════
@@ -2935,7 +3267,7 @@ async def giveaway_cmd(ctx, duration: str, *, prize: str):
     if not delta:
         return await ctx.reply("Invalid duration! Use e.g. `1d`, `2h`, `30m`")
     end_time = (datetime.datetime.now() + delta).isoformat()
-    embed = gara_embed(title="🎉 Giveaway!",
+    embed = gara_embed(title="Giveaway!",
         description=f"**Prize:** {prize}\nReact with 🎉 to enter!\nEnds: **{duration}** from now.",
         color=GaraConfig.EMBED_COLOR_SUCCESS, guild_id=ctx.guild.id)
     msg = await ctx.send(embed=embed)
@@ -3008,7 +3340,7 @@ async def battle_cmd(ctx, opponent: discord.Member):
     else:
         winner = loser = None
         color = GaraConfig.EMBED_COLOR_WARN
-    embed = gara_embed(title="⚔️ Battle!", color=color, guild_id=ctx.guild.id)
+    embed = gara_embed(title="Battle!", color=color, guild_id=ctx.guild.id)
     if winner:
         embed.description = f"**{winner.mention}** defeated {loser.mention}!\n**{bet:,}** {abbrev} transferred!"
     else:
@@ -3026,7 +3358,7 @@ async def battle_cmd(ctx, opponent: discord.Member):
 @commands.cooldown(1, 3, commands.BucketType.user)
 async def help_cmd(ctx):
     view = HelpView(ctx)
-    await ctx.reply(embed=view.main_embed(), view=view)
+    await ctx.reply(embed=view._cat_embed(), view=view)
 
 
 # ══════════════════════════════════════════
@@ -3539,10 +3871,10 @@ def keep_alive():
 
 if __name__ == "__main__":
     keep_alive()
-    TOKEN = os.environ.get("DISCORD_TOKEN")
+    TOKEN = os.environ.get("DISCORD_TOKEN", "").strip()
     if not TOKEN:
         print("ERROR: DISCORD_TOKEN not set!")
-        print("  Railway: Variables → Add DISCORD_TOKEN")
         print("  Replit: Secrets → Add DISCORD_TOKEN")
     else:
+        print(f"Token loaded, length={len(TOKEN)}, starts={TOKEN[:6]}...")
         bot.run(TOKEN)
